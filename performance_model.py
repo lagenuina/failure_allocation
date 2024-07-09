@@ -39,8 +39,25 @@ class PerformanceModel(nn.Module):
                                                            'upper_bound_1': Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
                                                            'lower_bound_2': Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True),
                                                            'upper_bound_2': Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
-                                                           'responsivness': Parameter(dtype(7.0 * np.ones(1)), requires_grad=True),
+                                                           'responsivness': Parameter(dtype(10 * np.ones(1)), requires_grad=True),
                 })
+
+            #     self.__local_operators[f'{operator_number}'] = ParameterDict({'lower_bound_1': Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True),
+            #                                                'upper_bound_1': Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
+            #                                                'lower_bound_2': Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True),
+            #                                                'upper_bound_2': Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
+            #                                                'upper_bound_responsivness': Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
+            #                                                'lower_bound_responsivness': Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True)
+            #     })
+            
+            # else: 
+            #     self.__remote_operators[f'{operator_number}'] = ParameterDict({'lower_bound_1': Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True),
+            #                                                'upper_bound_1': Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
+            #                                                'lower_bound_2': Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True),
+            #                                                'upper_bound_2': Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
+            #                                                'upper_bound_responsivness': Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
+            #                                                'lower_bound_responsivness': Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True)
+            #     })
 
         self.optimizer = torch.optim.Adam(self.parameters(), lr=0.001, weight_decay=0.0001)
 
@@ -74,11 +91,19 @@ class PerformanceModel(nn.Module):
         performance = torch.zeros(n_diffs)
 
         for i in range(n_diffs):
-            bin_center_idx_1, bin_center_idx_2 = observation_probability_index[i]
+            bin_center_idx_1, bin_center_idx_2, bin_center_idx_3 = observation_probability_index[i]
+            # performance[i] = (
+            #     self.calculate_performance(norm_lower_bound_1, norm_upper_bound_1, bin_centers[bin_center_idx_1]) *
+            #     self.calculate_performance(norm_lower_bound_2, norm_upper_bound_2, bin_centers[bin_center_idx_2]) *
+            #     (bin_centers[bin_center_idx_3] * (1 + responsivness)) / (1 + bin_centers[bin_center_idx_3])
+            #     )
             performance[i] = (
                 self.calculate_performance(norm_lower_bound_1, norm_upper_bound_1, bin_centers[bin_center_idx_1]) *
-                self.calculate_performance(norm_lower_bound_2, norm_upper_bound_2, bin_centers[bin_center_idx_2])
-            )
+                self.calculate_performance(norm_lower_bound_2, norm_upper_bound_2, bin_centers[bin_center_idx_2]) *
+                responsivness
+                )
+            
+            # print((bin_centers[bin_center_idx_3] * (1 + responsivness)) / (1 + bin_centers[bin_center_idx_3]), responsivness)
 
         return performance.cuda() if torch.cuda.is_available() else performance
 
@@ -95,6 +120,7 @@ class PerformanceModel(nn.Module):
     
     def calculate_performance_to_urgency(self, task_urgency, responsivness):
         
+        #USE FOR REWARD
         performance_urgency = (task_urgency * (1 + responsivness)) / (1 + task_urgency)
         
         return performance_urgency.cuda() if torch.cuda.is_available() else performance_urgency
@@ -102,7 +128,7 @@ class PerformanceModel(nn.Module):
     def update(self, bin_centers, obs_probs, obs_probs_idxs, operator_number):
 
         predicted_values = self.forward(bin_centers, obs_probs_idxs, operator_number)
-        obs_probs_vect = torch.tensor([obs_probs[j, k] for j, k in obs_probs_idxs], dtype=torch.float64, requires_grad=True)
+        obs_probs_vect = torch.tensor([obs_probs[j, k, z] for j, k, z in obs_probs_idxs], dtype=torch.float64, requires_grad=True)
         
         obs_probs = dtype(obs_probs)
 
@@ -133,8 +159,9 @@ class PerformanceModel(nn.Module):
             predicted_values = self.forward(bin_centers, obs_probs_idxs, operator_number)
             loss = torch.mean(torch.pow((predicted_values - obs_probs_vect), 2.0))
 
-            self.__loss_to_save.append(loss.item())
+            print(responsivness, loss)
 
+            self.__loss_to_save.append(loss.item())
         
             if loss.item() < 0.0005:
                 self.__t_count += 1
@@ -201,49 +228,46 @@ class TaskAllocation:
             norm_arr.append(temp)
         return norm_arr
 
-    def calculate_reward(self):
+    def calculate_reward(self, urgency, capability_local, capability_remote):
 
         reward = []
-        deviations = []
-
-        average_workload = sum(self.failures['duration'])/(len(self.failures['duration']) + 0.00000001)
-
-        for failure_number in range(self.failure_counter):
-            deviations.append(self.failures['duration'][failure_number] - average_workload)
         
-        if len(deviations) != 0:
-            normalized_deviations = self.normalize(deviations, 0, 1)
-
         for i in range(self.NUM_OPERATORS):
-
-            average_speed = 0
-            deviation_from_mean = 0
-            r = []
-
-            if self.failure_counter != 0:
-
-                for j in range(self.failure_counter):
-                    if self.task_allocation[j] == i:
-                        
-                        deviation_from_mean += normalized_deviations[j]
-                        
-                        if self.failures['duration'][j] > self.THRESHOLD:
-                            r.append(0)
-                        else:
-                            r.append(1 - (self.failures['duration'][j]/self.THRESHOLD))
-
-                average_speed = sum(r)/(len(r) + 0.00001)
             
-            if self.failure_counter != 0:
-                print("Normalized deviations:", normalized_deviations)
-            print("Average speed:", average_speed)
-            print("Deviation from mean", deviation_from_mean)
-            print("\n")
-            reward.append(average_speed - deviation_from_mean)
-        
+            if i % 2 == 0:
+                responsivness = capability_local[i]['responsivness']
+            else:
+                responsivness = capability_remote[i]['responsivness']
+
+            reward_urgency = (urgency * (1 + responsivness)) / (1 + urgency)
+            reward.append(reward_urgency)
+
+        print(reward)
+        print("\n")
+
         self.failure_counter += 1
 
         return reward
+    
+    def calculate_cost(self):
+
+        cost = []
+        total_time_failures = sum(self.failures['duration'])
+
+        for i in range(self.NUM_OPERATORS):
+            operator_time_failures = 0
+            
+            if self.failure_counter != 0:
+                for j in range(self.failure_counter):
+                    if self.task_allocation[j] == i:
+                        operator_time_failures += self.failures['duration'][j]
+
+                ratio_failures = (operator_time_failures/total_time_failures)
+                cost.append(ratio_failures)
+            else:
+                cost = [0, 0]
+
+        return cost
     
 class AllocationFramework:
     def __init__(self, num_operators, num_bins, num_failures, threshold):
@@ -279,12 +303,13 @@ class AllocationFramework:
 
             # Local operators have even number indexes
             if operator_number % 2 == 0:
-
-                self.__total_observations_local[operator_number] = np.zeros((self.NUM_BINS, self.NUM_BINS)) 
+                self.observations_probabilities_local[operator_number] = np.zeros((self.NUM_BINS, self.NUM_BINS,  self.NUM_BINS)) 
+                self.__total_observations_local[operator_number] = np.zeros((self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)) 
                 self.__total_success_local[operator_number] = np.zeros((self.NUM_BINS, self.NUM_BINS)) 
 
             else: 
-                self.__total_observations_remote[operator_number] = np.zeros((self.NUM_BINS, self.NUM_BINS)) 
+                self.observations_probabilities_remote[operator_number] = np.zeros((self.NUM_BINS, self.NUM_BINS,  self.NUM_BINS)) 
+                self.__total_observations_remote[operator_number] = np.zeros((self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)) 
                 self.__total_success_remote[operator_number] = np.zeros((self.NUM_BINS, self.NUM_BINS)) 
 
 
@@ -308,6 +333,7 @@ class AllocationFramework:
         failures_assigned_to_local = sum(1 for number in self.__task_allocation.task_allocation if number % 2 == 0)
         failures_assigned_to_remote = sum(1 for number in self.__task_allocation.task_allocation if number % 2 != 0)
 
+        print(failures_assigned_to_local, failures_assigned_to_remote)
         if expected_reward_difference <= alpha_tolerance:
 
             if failures_assigned_to_local <= failures_assigned_to_remote:
@@ -333,9 +359,11 @@ class AllocationFramework:
         
         ## Simulation purposes
         if failure_allocated_to == 0:
-            time.sleep(random.randint(0, 4))
+            # time.sleep(random.randint(0, 3))
+            time.sleep(3)
         else:
-            time.sleep(random.randint(0, 10))
+            time.sleep(6)
+            # time.sleep(random.randint(0, 10))
 
 
         self.__task_allocation.failure_ended()
@@ -345,6 +373,9 @@ class AllocationFramework:
 
     def main_loop(self):
 
+        urgency_local = []
+        urgency_remote = []
+
         print(f"Running ATTA Iter {iter}")
         for i in range(self.NUM_FAILURES):
 
@@ -353,7 +384,7 @@ class AllocationFramework:
             for operator in range(self.NUM_OPERATORS):
                 norm_l1, norm_u1, norm_l2, norm_u2, responsivness = self.__model.get_parameters(operator)
                 
-                if i % 2 == 0:
+                if operator % 2 == 0:
                     self.__capabilities_local[operator] = {'lower_bound_1': norm_l1,
                                                     'upper_bound_1': norm_u1,
                                                     'lower_bound_2': norm_l2,
@@ -369,64 +400,104 @@ class AllocationFramework:
                     
                 performance_capability_1 = self.__model.calculate_performance(norm_l1, norm_u1, self.__task_requirements[0, i])
                 performance_capability_2 = self.__model.calculate_performance(norm_l2, norm_u2, self.__task_requirements[1, i])
-                performance_urgency = self.__model.calculate_performance_to_urgency(self.__task_requirements[2, i], responsivness)
+                # performance_urgency = self.__model.calculate_performance_to_urgency(self.__task_requirements[2, i], responsivness)
             
-                print("Task urgency:", self.__task_requirements[2, i])
-                print("Responsivness:", responsivness)
-                print("Performance urgency:", performance_urgency)
+                # print("Task urgency:", self.__task_requirements[2, i])
+                # print("Responsivness:", responsivness)
+                # print("Performance urgency:", performance_urgency)
 
-                self.__performance_index[operator] = performance_capability_1 * performance_capability_2 * performance_urgency
+                self.__performance_index[operator] = performance_capability_1 + performance_capability_2
 
             if torch.cuda.is_available():
                 self.__performance_index = {key: value.cuda() for key, value in self.__performance_index.items()}
 
-            reward = self.__task_allocation.calculate_reward()
+            cost =  self.__task_allocation.calculate_cost()
+            reward = self.__task_allocation.calculate_reward(self.__task_requirements[2, i], self.__capabilities_local, self.__capabilities_remote)
 
-            expected_reward_local = reward[0] * self.__performance_index[0]
-            expected_reward_remote = reward[1] * self.__performance_index[1]
+            expected_reward_local = reward[0] + self.__performance_index[0] - cost[0]
+            expected_reward_remote = reward[1] + self.__performance_index[1] - cost[1]
+
+            # print("Performance index:", self.__performance_index)
+            # print(expected_reward_local, expected_reward_remote)
 
             assigned_to = self.__assign_failure(expected_reward_local, expected_reward_remote)
 
+            if assigned_to == 0:
+                urgency_local.append(self.__task_requirements[2, i])
+            else:
+                urgency_remote.append(self.__task_requirements[2, i])
+
             for j in range(self.NUM_BINS):
                 for k in range(self.NUM_BINS):
-                    if self.__bin_limits[j] < self.__task_requirements[0, i] <= self.__bin_limits[j + 1] and self.__bin_limits[k] < self.__task_requirements[1, i] <= self.__bin_limits[k + 1]:
-                        if assigned_to == 0:
+                    for z in range(self.NUM_BINS):
 
-                            #TO DO: Change to generalize to any local
-                            self.__total_observations_local[0][j, k] += 1
+                        if self.__bin_limits[j] < self.__task_requirements[0, i] <= self.__bin_limits[j + 1] and self.__bin_limits[k] < self.__task_requirements[1, i] <= self.__bin_limits[k + 1] and self.__bin_limits[z] < self.__task_requirements[2, i] <= self.__bin_limits[z + 1]:
+                        
+                            # print(self.__task_allocation.failures['duration'])
+                    
+                            if self.__task_allocation.failures['duration'][-1] > self.THRESHOLD:
+                                responsivness_index = 0
+                            else:
+                                responsivness_index = (1 - (self.__task_allocation.failures['duration'][-1]/self.THRESHOLD))
 
-                            if self.__task_allocation.failures['duration'][i] < self.THRESHOLD:
+                            if assigned_to == 0:
+                                if self.observations_probabilities_local[0][j, k, z] != 0:
+                                    avg = (self.observations_probabilities_local[0][j, k, z] + responsivness_index)/2
+                                else:
+                                    avg = responsivness_index
 
-                                
-                                self.__total_success_local[0][j, k] += 1
+                                self.observations_probabilities_local[0][j, k, z] = avg
+                                #TO DO: Change to generalize to any local
+                                self.__total_observations_local[0][j, k, z] += 1
 
-                        elif assigned_to == 1:
-                            self.__total_observations_remote[1][j, k] += 1
-                            if self.__task_allocation.failures['duration'][i] < self.THRESHOLD:
-                                self.__total_success_remote[1][j, k] += 1
+                                # if self.__task_allocation.failures['duration'][i] < self.THRESHOLD:
+
+                                    
+                                #     self.__total_success_local[0][j, k] += 1
+
+                            elif assigned_to == 1:
+
+                                if self.observations_probabilities_remote[1][j, k, z] != 0:
+                                    avg = (self.observations_probabilities_remote[1][j, k, z] + responsivness_index)/2
+                                else:
+                                    avg = responsivness_index
+
+                                self.observations_probabilities_remote[1][j, k, z] = avg
+
+                                self.__total_observations_remote[1][j, k, z] += 1
+
 
             # Calculate observed probabilities for local and remote
-            self.observations_probabilities_local[0] = dtype(np.divide(self.__total_success_local[0], self.__total_observations_local[0], where=self.__total_observations_local[0] != 0))
-            self.observations_probabilities_remote[1] = dtype(np.divide(self.__total_success_remote[1], self.__total_observations_remote[1], where=self.__total_observations_remote[1] != 0))
+            # self.observations_probabilities_local[0] = dtype(np.divide(self.__total_success_local[0], self.__total_observations_local[0], where=self.__total_observations_local[0] != 0))
+            # self.observations_probabilities_remote[1] = dtype(np.divide(self.__total_success_remote[1], self.__total_observations_remote[1], where=self.__total_observations_remote[1] != 0))
 
             # Prepare data for trust model update for local
-            self.probabilities_index_local = np.array([[j, k] for j in range(self.NUM_BINS) for k in range(self.NUM_BINS) if self.__total_observations_local[0][j, k] > 0])
+            self.probabilities_index_local = np.array([[j, k, z] for j in range(self.NUM_BINS) for k in range(self.NUM_BINS) for z in range(self.NUM_BINS) if self.__total_observations_local[0][j, k, z] > 0])
             
             # Prepare data for trust model update for remote
-            self.probabilities_index_remote = np.array([[j, k] for j in range(self.NUM_BINS) for k in range(self.NUM_BINS) if self.__total_observations_remote[1][j, k] > 0])
+            self.probabilities_index_remote = np.array([[j, k, z] for j in range(self.NUM_BINS) for k in range(self.NUM_BINS) for z in range(self.NUM_BINS) if self.__total_observations_remote[1][j, k, z] > 0])
 
             if assigned_to == 1:
                 self.__model.update(self.bin_centers, self.observations_probabilities_remote[1], self.probabilities_index_remote, 1)
             else:
                 self.__model.update(self.bin_centers, self.observations_probabilities_local[0], self.probabilities_index_local, 0)
 
+        for operator in range(self.NUM_OPERATORS):
+            norm_l1, norm_u1, norm_l2, norm_u2, responsivness = self.__model.get_parameters(operator)
+            print("Responsivness", responsivness)
+                
+        print(urgency_local)
+        print("Avg", sum(urgency_local)/len(urgency_local))
+        print(urgency_remote)
+        print("Sum", sum(urgency_remote)/len(urgency_remote))
+
 if __name__ == "__main__":
 
     num_operators = 2
     num_bins = 25
     num_failures = 40
-    threshold = 5
-    performance_model_allocation = AllocationFramework(num_operators=2, num_bins=25, num_failures=50, threshold=5)
+    threshold = 6
+    performance_model_allocation = AllocationFramework(num_operators=2, num_bins=25, num_failures=500, threshold=8)
 
     performance_model_allocation.main_loop()
 
