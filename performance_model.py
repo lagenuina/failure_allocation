@@ -1,10 +1,16 @@
+#!/usr/bin/env python
+# import rospy
+# from std_msgs.msg import Int32, Float32MultiArray, Bool, Float32
+
 import torch
 from torch import nn, sigmoid, argmax
 from torch.nn import Parameter, ParameterDict
 import numpy as np
-import scipy.io as sio
 import random
 import time
+import pandas as pd
+import csv
+import os
 
 # Set data type based on CUDA availability
 dtype = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.DoubleTensor
@@ -114,7 +120,7 @@ class PerformanceModel(nn.Module):
         t = 0
         loss_200_iters_ago, current_loss = 0, 0
 
-        while t < 2200:
+        while t < 4000:
             def closure():
 
                 diff = self(bin_centers, obs_probs_idxs, operator_number) - obs_probs_vect
@@ -131,7 +137,7 @@ class PerformanceModel(nn.Module):
             predicted_values = self.forward(bin_centers, obs_probs_idxs, operator_number)
             loss = torch.mean(torch.pow((predicted_values - obs_probs_vect), 2.0))
 
-            print(responsiveness, loss)
+            print(loss)
 
             self.__loss_to_save.append(loss.item())
         
@@ -183,9 +189,16 @@ class TaskAllocation:
         self.__start_time_failure = time.time() - self.__start_time
         self.failures['start_time'].append(self.__start_time_failure)
 
-    def failure_ended(self):
+    def failure_ended(self, failure_allocated):
 
-        duration = (time.time() - self.__start_time) - self.failures['start_time'][-1]
+        if failure_allocated % 2 == 0:
+            # duration = random.randint(1, 3)
+            duration = 3
+        else:
+            duration = 6
+            # duration = random.randint(1, 6)
+
+        # duration = (time.time() - self.__start_time) - self.failures['start_time'][-1]
         
         self.failures['duration'].append(duration)
         self.failures['end_time'].append(time.time() - self.__start_time)
@@ -206,7 +219,6 @@ class TaskAllocation:
 
         self.failure_counter += 1
 
-        print("Reward", reward)
         return reward
     
     def calculate_cost(self):
@@ -227,7 +239,6 @@ class TaskAllocation:
             else:
                 cost = np.zeros(self.NUM_OPERATORS)
 
-        print(cost)
         return cost
     
 class AllocationFramework:
@@ -249,9 +260,20 @@ class AllocationFramework:
 
         self.__workload = {}
 
+        keys = []
         for i in range(self.NUM_OPERATORS):
             self.__workload[i] = 0
-
+            keys.append(f'{i}_lower_bound_1') 
+            keys.append(f'{i}_upper_bound_1') 
+            keys.append(f'{i}_lower_bound_2') 
+            keys.append(f'{i}_upper_bound_2')
+            keys.append(f'{i}_responsiveness')
+            keys.append(f'{i}_reward_urgency')
+            keys.append(f'{i}_reward_capabilities')
+            keys.append(f'{i}_cost')
+            keys.append(f'{i}_total_reward')
+        
+        self.__results = {key: [] for key in keys}
         self.__total_observations_local = {}
         self.__total_observations_remote = {}
 
@@ -265,6 +287,7 @@ class AllocationFramework:
         self.probabilities_index_remote = []
 
         self.__failures_assigned = {}
+        
 
         for i in range(self.NUM_OPERATORS):  
             operator_number = i
@@ -283,13 +306,13 @@ class AllocationFramework:
                 self.__total_success_remote[operator_number] = np.zeros((self.NUM_BINS, self.NUM_BINS)) 
 
 
-        load_file_name = "./artificial-trust-task-allocation-main/code/results/tasks/TA_normaldist_tasks_0.mat"
-        fixed_tasks_mat = sio.loadmat(load_file_name)
-        self.__task_requirements = fixed_tasks_mat["p"][:, :self.NUM_FAILURES]
+        load_file_name = "failure_requirements.csv"
+        data_frame = pd.read_csv(load_file_name, header=None)
+        self.__task_requirements = data_frame.iloc[:, :self.NUM_FAILURES].values
         # print(self.__task_requirements)
 
         # Add row for urgency
-        self.__task_requirements = np.vstack((fixed_tasks_mat["p"][:, :self.NUM_FAILURES], np.round(np.random.uniform(0.1, 1, self.NUM_FAILURES), 2)))
+        # self.__task_requirements = np.vstack((fixed_tasks_mat["p"][:, :self.NUM_FAILURES], np.round(np.random.uniform(0.1, 1, self.NUM_FAILURES), 2)))
 
         self.__capabilities_local = {}
         self.__capabilities_remote = {}
@@ -309,27 +332,26 @@ class AllocationFramework:
 
             # Assign to the operator with least amount of failures
             failure_allocated_to = min(self.__failures_assigned, key=lambda k: self.__failures_assigned[k])
-            print("AHAHHAHAHAA")
 
         else:
             failure_allocated_to = operators_highest_reward[0]
 
         self.__failures_assigned[failure_allocated_to] += 1
 
-        if failure_allocated_to % 2 == 0:
-            print("Task allocated to local operator", failure_allocated_to)
-            time.sleep(random.randint(1, 3))
-            # time.sleep(3)
+        # if failure_allocated_to % 2 == 0:
+        #     print("Task allocated to local operator", failure_allocated_to)
+        #     # time.sleep(random.randint(1, 3))
+        #     # time.sleep(3)
 
-        else:
-            print("Task allocated to remote operator", failure_allocated_to)
-            time.sleep(random.randint(1, 6))
+        # else:
+        #     print("Task allocated to remote operator", failure_allocated_to)
+        #     # time.sleep(random.randint(1, 6))
 
-            # time.sleep(6)
+        #     # time.sleep(6)
 
         self.__task_allocation.task_allocation.append(failure_allocated_to)
 
-        self.__task_allocation.failure_ended()
+        self.__task_allocation.failure_ended(failure_allocated_to)
         print("\n")
 
         return failure_allocated_to
@@ -346,10 +368,12 @@ class AllocationFramework:
 
         # print(previous_workload, current_workload, self.__workload[operator])
 
+
     def main_loop(self):
 
-        print(f"Running Iter {iter}")
         for i in range(self.NUM_FAILURES):
+            print("Failure", i)
+            print(self.__failures_assigned)
 
             self.__task_allocation.failure_started() #SIMULATION PURPOSES
             
@@ -373,7 +397,7 @@ class AllocationFramework:
                 performance_capability_1 = self.__model.calculate_performance(norm_l1, norm_u1, self.__task_requirements[0, i])
                 performance_capability_2 = self.__model.calculate_performance(norm_l2, norm_u2, self.__task_requirements[1, i])
 
-                self.__performance_index[operator] = performance_capability_1 + performance_capability_2
+                self.__performance_index[operator] = performance_capability_1 * performance_capability_2
 
             if torch.cuda.is_available():
                 self.__performance_index = {key: value.cuda() for key, value in self.__performance_index.items()}
@@ -383,9 +407,8 @@ class AllocationFramework:
 
             expected_reward = []
             for operator in range(self.NUM_OPERATORS):
-                expected_reward.append(reward[operator] + self.__performance_index[operator] - cost[operator])
+                expected_reward.append(reward[operator]*self.__performance_index[operator] - cost[operator])
 
-            print("Exp reward:", expected_reward)
             assigned_to = self.__assign_failure(expected_reward)
 
             self.__update_workload(i, assigned_to)
@@ -429,11 +452,61 @@ class AllocationFramework:
                 self.probabilities_index_remote = np.array([[j, k, z] for j in range(self.NUM_BINS) for k in range(self.NUM_BINS) for z in range(self.NUM_BINS) if self.__total_observations_remote[assigned_to][j, k, z] > 0])
                 self.__model.update(self.bin_centers, self.observations_probabilities_remote[assigned_to], self.probabilities_index_remote, assigned_to)
 
+            self.save_results(reward, self.__performance_index, cost, expected_reward)
+
+        self.write_results()
+    
+    def save_results(self, reward_urgency, reward_capabilities, cost, total_reward):
+
         for operator in range(self.NUM_OPERATORS):
             norm_l1, norm_u1, norm_l2, norm_u2, responsiveness = self.__model.get_parameters(operator)
-            print("Responsivness", responsiveness)
-            print(self.__failures_assigned)
-            
+
+            self.__results[f'{operator}_lower_bound_1'].append(norm_l1.item())
+            self.__results[f'{operator}_upper_bound_1'].append(norm_u1.item())
+            self.__results[f'{operator}_lower_bound_2'].append(norm_l2.item())
+            self.__results[f'{operator}_upper_bound_2'].append(norm_u2.item())
+            self.__results[f'{operator}_responsiveness'].append(responsiveness.item())
+            self.__results[f'{operator}_reward_urgency'].append(reward_urgency[operator].item())
+            self.__results[f'{operator}_reward_capabilities'].append((reward_capabilities[operator]).item())
+            self.__results[f'{operator}_cost'].append(cost[operator])
+            self.__results[f'{operator}_total_reward'].append(total_reward[operator].item())
+
+    def save_other_results(self):
+
+        self.__results['failures_duration'] = self.__task_allocation.failures['duration']
+        self.__results['assigned'] = self.__task_allocation.task_allocation
+
+    def write_results(self):
+
+        # Determine the filename
+        base_filename = f'{self.NUM_OPERATORS}_operators_{self.NUM_FAILURES}_failures.csv'
+        filename = base_filename
+
+        # Check if the file already exists
+        if os.path.exists(filename):
+            # Find the next available filename
+            suffix = 1
+            while True:
+                new_filename = f'{base_filename.split(".csv")[0]} ({suffix}).csv'
+                if not os.path.exists(new_filename):
+                    filename = new_filename
+                    break
+                suffix += 1
+
+        # Generate headers from self.__results keys
+        headers = list(self.__results.keys())
+
+        # Write to CSV
+        with open(filename, 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(headers)  # Write headers
+                    
+            # Write each key's values as separate rows
+            max_length = max(len(self.__results[key]) for key in headers)
+            for i in range(max_length):
+                row = [self.__results[key][i] if i < len(self.__results[key]) else None for key in headers]
+                writer.writerow(row)
+                    
 
 if __name__ == "__main__":
 
@@ -441,7 +514,7 @@ if __name__ == "__main__":
     num_bins = 25
     num_failures = 40
     threshold = 6
-    performance_model_allocation = AllocationFramework(num_operators=5, num_bins=25, num_failures=100, threshold=8)
+    performance_model_allocation = AllocationFramework(num_operators=4, num_bins=25, num_failures=20, threshold=8)
 
     performance_model_allocation.main_loop()
 
