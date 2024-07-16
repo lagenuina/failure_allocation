@@ -13,7 +13,7 @@ import math
 dtype = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.DoubleTensor
 
 class PerformanceModel(nn.Module):
-    def __init__(self, NUM_OPERATORS):
+    def __init__(self, NUM_OPERATORS, lr, weight_decay):
         super(PerformanceModel, self).__init__()
         
         self.NUM_OPERATORS = NUM_OPERATORS
@@ -22,6 +22,8 @@ class PerformanceModel(nn.Module):
 
         self.__loss_to_save = []
         self.__t_count = 0
+        self.LR = lr
+        self.DECAY = weight_decay
 
         # Changed initialization of local and remote operators
         for i in range(self.NUM_OPERATORS):
@@ -50,7 +52,7 @@ class PerformanceModel(nn.Module):
             else:
                 self.__remote_operators[f'{operator_number}'] = ParameterDict(operator_params)
 
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=0.005, weight_decay=0.001)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=self.LR, weight_decay=self.DECAY)
 
     def get_parameters(self, operator_number):
 
@@ -83,7 +85,8 @@ class PerformanceModel(nn.Module):
         
         n_diffs = observation_probability_index.shape[0]
         performance = torch.zeros(n_diffs)
-    
+        norm_lower_bound_1, norm_upper_bound_1, norm_lower_bound_2, norm_upper_bound_2, norm_lower_bound_3, norm_upper_bound_3 = self.get_parameters(operator_number)
+
         for i in range(n_diffs):
             bin_center_idx_1, bin_center_idx_2, bin_center_idx_3 = observation_probability_index[i]
 
@@ -91,6 +94,11 @@ class PerformanceModel(nn.Module):
                 self.calculate_performance(1, operator_number, bin_centers[bin_center_idx_1]) *
                 self.calculate_performance(2, operator_number, bin_centers[bin_center_idx_2]) *
                 self.calculate_performance(3, operator_number, bin_centers[bin_center_idx_3]))
+            
+            # performance[i] = (
+            #     self.calculate_performance(norm_lower_bound_1, norm_upper_bound_1, bin_centers[bin_center_idx_1]) *
+            #     self.calculate_performance(norm_lower_bound_2, norm_upper_bound_2, bin_centers[bin_center_idx_2]) *
+            #     self.calculate_performance(norm_lower_bound_3, norm_upper_bound_3, bin_centers[bin_center_idx_3]))
 
         return performance.cuda() if torch.cuda.is_available() else performance
 
@@ -100,6 +108,17 @@ class PerformanceModel(nn.Module):
 
     #     return torch.sigmoid(x)
     
+    # def calculate_performance(self, lower_bound, upper_bound, task_requirement):
+        
+    #     if task_requirement <= lower_bound:
+    #         performance = torch.tensor([1.0])
+    #     elif task_requirement > upper_bound:
+    #         performance = torch.tensor([0.0])
+    #     else:
+    #         performance = (upper_bound - task_requirement) / (upper_bound - lower_bound + 0.0001)
+
+    #     return performance.cuda() if torch.cuda.is_available() else performance
+
     def calculate_performance(self, number, operator_number, task_requirement):
         
         if operator_number % 2 == 0:
@@ -109,15 +128,26 @@ class PerformanceModel(nn.Module):
 
         upper_bound = params[f'upper_bound_{number}']
         lower_bound = params[f'lower_bound_{number}']
-
+        
         x = (upper_bound - math.log(task_requirement / (1 - task_requirement))) / (upper_bound - lower_bound + 0.0001)
         
         return torch.sigmoid(x)
+        # if task_requirement <= lower_bound:
+        #     value = torch.tensor([10.0])
+        # elif task_requirement > upper_bound:
+        #     value = torch.tensor([-10.0])
+        # else:
+        #     value = (upper_bound - math.log(task_requirement / (1 - task_requirement))) / (upper_bound - lower_bound + 0.0001)
+        
+        # performance = torch.sigmoid(value)
+
+        # return performance.cuda() if torch.cuda.is_available() else performance
+
     
     def update(self, bin_centers, obs_probs, obs_probs_idxs, operator_number):
 
         predicted_values = self.forward(bin_centers, obs_probs_idxs, operator_number)
-        obs_probs_vect = torch.tensor([obs_probs[j, k, z] for j, k, z in obs_probs_idxs], dtype=torch.float64)
+        obs_probs_vect = torch.tensor([obs_probs[j, k, z] for j, k, z in obs_probs_idxs], dtype=torch.float64, requires_grad=True)
         
         obs_probs = dtype(obs_probs)
 
@@ -241,7 +271,7 @@ class TaskAllocation:
         return cost
     
 class AllocationFramework:
-    def __init__(self, num_operators, num_bins, num_failures, threshold):
+    def __init__(self, num_operators, num_bins, num_failures, threshold, lr, weight_decay):
         
         np.seterr(divide='ignore', invalid='ignore')
 
@@ -249,9 +279,11 @@ class AllocationFramework:
         self.NUM_BINS = num_bins
         self.NUM_FAILURES = num_failures
         self.THRESHOLD = threshold
+        self.LR = lr
+        self.DECAY = weight_decay
 
         self.__task_allocation = TaskAllocation(self.NUM_OPERATORS, self.THRESHOLD)
-        self.__model = PerformanceModel(self.NUM_OPERATORS)
+        self.__model = PerformanceModel(self.NUM_OPERATORS, self.LR, self.DECAY)
         self.__model = self.__model.cuda() if torch.cuda.is_available() else self.__model
 
         self.__bin_limits = dtype(np.concatenate([[0], np.linspace(1 / self.NUM_BINS, 1.0, self.NUM_BINS)]))
@@ -388,6 +420,9 @@ class AllocationFramework:
                 performance_capability_1 = self.__model.calculate_performance(1, operator, self.__task_requirements[0, i])
                 performance_capability_2 = self.__model.calculate_performance(2, operator, self.__task_requirements[1, i])
                 performance_capability_3 = self.__model.calculate_performance(3, operator, self.__task_requirements[2, i])
+                # performance_capability_1 = self.__model.calculate_performance(norm_l1, norm_u1, self.__task_requirements[0, i])
+                # performance_capability_2 = self.__model.calculate_performance(norm_l2, norm_u2, self.__task_requirements[1, i])
+                # performance_capability_3 = self.__model.calculate_performance(norm_l3, norm_u3, self.__task_requirements[2, i])
 
                 reward = self.__task_allocation.calculate_reward(self.__task_requirements[2, i], performance_capability_3)
                 
@@ -498,7 +533,8 @@ class AllocationFramework:
     def write_results(self):
 
         # Determine the filename
-        base_filename = f'{self.NUM_OPERATORS}_operators_{self.NUM_FAILURES}_failures.csv'
+        # base_filename = f'{self.NUM_OPERATORS}_operators_{self.NUM_FAILURES}_failures.csv'
+        base_filename = f'lr_{self.LR}_w_{self.DECAY}.csv'
         results_dir = 'results'  # Directory to save results
         filename = os.path.join(results_dir, base_filename)
 
@@ -537,9 +573,18 @@ if __name__ == "__main__":
     num_bins = 25
     num_failures = 40
     threshold = 6
-    performance_model_allocation = AllocationFramework(num_operators=2, num_bins=25, num_failures=30, threshold=10)
+    # lr = [0.01, 0.009, 0.008, 0.007, 0.006, 0.005, 0.004, 0.003, 0.002, 0.001, 0.0009, 0.0008, 0.0007, 0.0005]
+    # weight_decay = [0.0, 0.000001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01]
+    lr = [0.002]
+    weight_decay = [0.01]
 
-    performance_model_allocation.main_loop()
+    # for i in range(5):
+    for learning_rate in lr:
+        for decay in weight_decay:
+
+            performance_model_allocation = AllocationFramework(num_operators=2, num_bins=25, num_failures=50, threshold=8, lr=learning_rate, weight_decay=decay)
+
+            performance_model_allocation.main_loop()
 
 
 

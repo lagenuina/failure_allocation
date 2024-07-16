@@ -2,10 +2,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 num_operators = 2
-num_failures = 30
+num_failures = 20
 
 # Step 1: Read the CSV file into a pandas DataFrame
-df = pd.read_csv(f'results/{num_operators}_operators_{num_failures}_failures (36).csv')
+df = pd.read_csv(f'results/{num_operators}_operators_{num_failures}_failures (13).csv')
 
 # Step 2: Extract data for plotting
 operators = range(num_operators)  # Assuming you want to plot for operators 0, 1, and 2
