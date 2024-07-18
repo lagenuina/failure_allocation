@@ -1,6 +1,8 @@
 import torch
-from torch import nn, sigmoid, argmax
+from torch import nn, sigmoid
 from torch.nn import Parameter, ParameterDict
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
 import numpy as np
 import random
 import time
@@ -102,22 +104,6 @@ class PerformanceModel(nn.Module):
 
         return performance.cuda() if torch.cuda.is_available() else performance
 
-    # def calculate_performance(self, lower_bound, upper_bound, task_requirement):
-        
-    #     x = (upper_bound - task_requirement) / (upper_bound - lower_bound + 0.0001)
-
-    #     return torch.sigmoid(x)
-    
-    # def calculate_performance(self, lower_bound, upper_bound, task_requirement):
-        
-    #     if task_requirement <= lower_bound:
-    #         performance = torch.tensor([1.0])
-    #     elif task_requirement > upper_bound:
-    #         performance = torch.tensor([0.0])
-    #     else:
-    #         performance = (upper_bound - task_requirement) / (upper_bound - lower_bound + 0.0001)
-
-    #     return performance.cuda() if torch.cuda.is_available() else performance
 
     def calculate_performance(self, number, operator_number, task_requirement):
         
@@ -132,17 +118,6 @@ class PerformanceModel(nn.Module):
         x = (upper_bound - math.log(task_requirement / (1 - task_requirement))) / (upper_bound - lower_bound + 0.0001)
         
         return torch.sigmoid(x)
-        # if task_requirement <= lower_bound:
-        #     value = torch.tensor([10.0])
-        # elif task_requirement > upper_bound:
-        #     value = torch.tensor([-10.0])
-        # else:
-        #     value = (upper_bound - math.log(task_requirement / (1 - task_requirement))) / (upper_bound - lower_bound + 0.0001)
-        
-        # performance = torch.sigmoid(value)
-
-        # return performance.cuda() if torch.cuda.is_available() else performance
-
     
     def update(self, bin_centers, obs_probs, obs_probs_idxs, operator_number):
 
@@ -171,30 +146,28 @@ class PerformanceModel(nn.Module):
 
                 return loss
             
-            self.optimizer.step(closure)
-
-            # norm_lower_bound_1, norm_upper_bound_1, norm_lower_bound_2, norm_upper_bound_2, responsiveness = self.get_parameters(operator_number)
+            self.optimizer.step(closure)            
 
             predicted_values = self.forward(bin_centers, obs_probs_idxs, operator_number)
             loss = torch.mean(torch.pow((predicted_values - obs_probs_vect), 2.0))
-            # print(loss.item())
             self.__loss_to_save.append(loss.item())
-        
+            
+            
             if loss.item() < 0.0005:
                 self.__t_count += 1
                 break
 
-            if t % 200 == 0:
-                if t == 0:
-                    loss_200_iters_ago = -1000
-                    current_loss = self.__loss_to_save[-1]
-                else:
-                    loss_200_iters_ago = current_loss
-                    current_loss = self.__loss_to_save[-1]
+            # if t % 200 == 0:
+            #     if t == 0:
+            #         loss_200_iters_ago = -1000
+            #         current_loss = self.__loss_to_save[-1]
+            #     else:
+            #         loss_200_iters_ago = current_loss
+            #         current_loss = self.__loss_to_save[-1]
 
-            if abs(current_loss - loss_200_iters_ago) < 1e-8:
-                self.__t_count += 1
-                break
+            # if abs(current_loss - loss_200_iters_ago) < 1e-8:
+            #     self.__t_count += 1
+            #     break
 
             t += 1
             self.__t_count += 1
@@ -247,6 +220,17 @@ class TaskAllocation:
         reward = (urgency * (1 + responsiveness)) / (1 + urgency)
 
         return reward
+    
+    def calculate_reward_capability(self, lower_bound, upper_bound, task_requirement):
+
+        if task_requirement <= lower_bound:
+            performance = torch.tensor([1.0])
+        elif task_requirement > upper_bound:
+            performance = torch.tensor([0.0])
+        else:
+            performance = (upper_bound - task_requirement) / (upper_bound - lower_bound + 0.0001)
+
+        return performance.cuda() if torch.cuda.is_available() else performance
     
     def calculate_cost(self):
 
@@ -370,17 +354,6 @@ class AllocationFramework:
 
         self.__failures_assigned[failure_allocated_to] += 1
 
-        # if failure_allocated_to % 2 == 0:
-        #     print("Task allocated to local operator", failure_allocated_to)
-        #     # time.sleep(random.randint(1, 3))
-        #     # time.sleep(3)
-
-        # else:
-        #     print("Task allocated to remote operator", failure_allocated_to)
-        #     # time.sleep(random.randint(1, 6))
-
-        #     # time.sleep(6)
-
         self.__task_allocation.task_allocation.append(failure_allocated_to)
 
         self.__task_allocation.failure_ended(failure_allocated_to)
@@ -465,34 +438,6 @@ class AllocationFramework:
                                 self.__total_observations_remote[assigned_to][j, k, z] += 1
 
 
-                        # if self.__bin_limits[j] < self.__task_requirements[0, i] <= self.__bin_limits[j + 1] and self.__bin_limits[k] < self.__task_requirements[1, i] <= self.__bin_limits[k + 1] and self.__bin_limits[z] < self.__task_requirements[2, i] <= self.__bin_limits[z + 1]:
-
-                        #     if self.__task_allocation.failures['duration'][-1] > adjusted_threshold:
-                        #         responsiveness_index = 0
-                        #     else:
-                        #         responsiveness_index = (1 - (self.__task_allocation.failures['duration'][-1]/adjusted_threshold))
-        
-
-                        #     if assigned_to % 2 == 0:
-                        #         if self.observations_probabilities_local[assigned_to][j, k, z] != 0:
-                        #             avg = (self.observations_probabilities_local[assigned_to][j, k, z] + responsiveness_index)/2
-                        #         else:
-                        #             avg = responsiveness_index
-
-                        #         self.observations_probabilities_local[assigned_to][j, k, z] = avg
-                        #         self.__total_observations_local[assigned_to][j, k, z] += 1
-
-                        #     else:
-
-                        #         if self.observations_probabilities_remote[assigned_to][j, k, z] != 0:
-                        #             avg = (self.observations_probabilities_remote[assigned_to][j, k, z] + responsiveness_index)/2
-                        #         else:
-                        #             avg = responsiveness_index
-
-                        #         self.observations_probabilities_remote[assigned_to][j, k, z] = avg
-
-                        #         self.__total_observations_remote[assigned_to][j, k, z] += 1
-
             if assigned_to % 2 == 0:
                 self.observations_probabilities_local[assigned_to] = np.divide(self.__success_local[assigned_to], self.__total_observations_local[assigned_to], where=self.__total_observations_local[assigned_to] != 0)
 
@@ -534,7 +479,7 @@ class AllocationFramework:
 
         # Determine the filename
         # base_filename = f'{self.NUM_OPERATORS}_operators_{self.NUM_FAILURES}_failures.csv'
-        base_filename = f'lr_{self.LR}_w_{self.DECAY}.csv'
+        base_filename = f'lr_{self.LR}_w_{self.DECAY}_operators_{self.NUM_OPERATORS}_failures_{self.NUM_FAILURES}.csv'
         results_dir = 'results'  # Directory to save results
         filename = os.path.join(results_dir, base_filename)
 
@@ -573,18 +518,19 @@ if __name__ == "__main__":
     num_bins = 25
     num_failures = 40
     threshold = 6
-    # lr = [0.01, 0.009, 0.008, 0.007, 0.006, 0.005, 0.004, 0.003, 0.002, 0.001, 0.0009, 0.0008, 0.0007, 0.0005]
+    # lr = [0.01, 0.005, 0.001, 0.0005, 0.0001]
     # weight_decay = [0.0, 0.000001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01]
-    lr = [0.002]
-    weight_decay = [0.01]
+    
+    lr = [0.001]
+    weight_decay = [0.001]
 
-    # for i in range(5):
-    for learning_rate in lr:
-        for decay in weight_decay:
+    for i in range(5):
+        for learning_rate in lr:
+            for decay in weight_decay:
 
-            performance_model_allocation = AllocationFramework(num_operators=2, num_bins=25, num_failures=50, threshold=8, lr=learning_rate, weight_decay=decay)
+                performance_model_allocation = AllocationFramework(num_operators=2, num_bins=25, num_failures=40, threshold=8, lr=learning_rate, weight_decay=decay)
 
-            performance_model_allocation.main_loop()
+                performance_model_allocation.main_loop()
 
 
 

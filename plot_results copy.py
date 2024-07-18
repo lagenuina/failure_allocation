@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import glob
 num_operators = 2
-num_failures = 20
+num_failures = 50
 
 # Step 1: Read the CSV file into a pandas DataFrame
 # df = pd.read_csv(f'results/{num_operators}_operators_{num_failures}_failures (1).csv')
@@ -86,4 +86,4 @@ for file_index, csv_file in enumerate(csv_files):
 # Adjust layout and show plot
 plt.tight_layout()
 fig.canvas.manager.set_window_title(f'File: {csv_file}')
-# plt.show()
+plt.show()
