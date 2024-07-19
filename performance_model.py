@@ -22,7 +22,6 @@ class PerformanceModel(nn.Module):
         self.__local_operators = nn.ModuleDict()
         self.__remote_operators = nn.ModuleDict()
 
-        self.__loss_to_save = []
         self.__t_count = 0
         self.LR = lr
         self.DECAY = weight_decay
@@ -119,6 +118,39 @@ class PerformanceModel(nn.Module):
         
         return torch.sigmoid(x)
     
+    def __check_convergence(self, operator):
+        norm_l1, norm_u1, norm_l2, norm_u2, norm_l3, norm_u3 = self.get_parameters(operator)
+        
+        if abs(norm_u1 - norm_l1) < 0.005:
+            
+            if operator % 2 == 0:
+                if self.__local_operators[f'{operator}']['upper_bound_1'].grad is not None and self.__local_operators[f'{operator}']['lower_bound_1'].grad is not None:
+                    self.__local_operators[f'{operator}']['upper_bound_1'].requires_grad = False
+                    self.__local_operators[f'{operator}']['lower_bound_1'].requires_grad = False
+            else:
+                if self.__remote_operators[f'{operator}']['upper_bound_1'].grad is not None and self.__remote_operators[f'{operator}']['lower_bound_1'].grad is not None:
+                    self.__remote_operators[f'{operator}']['upper_bound_1'].requires_grad = False
+                    self.__remote_operators[f'{operator}']['lower_bound_1'].requires_grad = False
+        if abs(norm_u2 - norm_l2) < 0.005:
+            if operator % 2 == 0:
+                if self.__local_operators[f'{operator}']['upper_bound_2'].grad is not None and self.__local_operators[f'{operator}']['lower_bound_2'].grad is not None:
+                    self.__local_operators[f'{operator}']['upper_bound_2'].requires_grad = False
+                    self.__local_operators[f'{operator}']['lower_bound_2'].requires_grad = False
+            else:
+                if self.__remote_operators[f'{operator}']['upper_bound_2'].grad is not None and self.__remote_operators[f'{operator}']['lower_bound_2'].grad is not None:
+                    self.__remote_operators[f'{operator}']['upper_bound_2'].requires_grad = False
+                    self.__remote_operators[f'{operator}']['lower_bound_2'].requires_grad = False
+
+        if abs(norm_u3 - norm_l3) < 0.005:
+            if operator % 2 == 0:
+                if self.__local_operators[f'{operator}']['upper_bound_3'].grad is not None and self.__local_operators[f'{operator}']['lower_bound_3'].grad is not None:
+                    self.__local_operators[f'{operator}']['upper_bound_3'].requires_grad = False
+                    self.__local_operators[f'{operator}']['lower_bound_3'].requires_grad = False
+            else:
+                if self.__remote_operators[f'{operator}']['upper_bound_3'].grad is not None and self.__remote_operators[f'{operator}']['lower_bound_3'].grad is not None:
+                    self.__remote_operators[f'{operator}']['upper_bound_3'].requires_grad = False
+                    self.__remote_operators[f'{operator}']['lower_bound_3'].requires_grad = False
+
     def update(self, bin_centers, obs_probs, obs_probs_idxs, operator_number):
 
         predicted_values = self.forward(bin_centers, obs_probs_idxs, operator_number)
@@ -134,7 +166,6 @@ class PerformanceModel(nn.Module):
 
         # Iterative optimization
         t = 0
-        loss_200_iters_ago, current_loss = 0, 0
 
         while t < 2200:
             def closure():
@@ -152,22 +183,11 @@ class PerformanceModel(nn.Module):
             loss = torch.mean(torch.pow((predicted_values - obs_probs_vect), 2.0))
             self.__loss_to_save.append(loss.item())
             
-            
+            self.__check_convergence(operator_number)
+
             if loss.item() < 0.0005:
                 self.__t_count += 1
                 break
-
-            # if t % 200 == 0:
-            #     if t == 0:
-            #         loss_200_iters_ago = -1000
-            #         current_loss = self.__loss_to_save[-1]
-            #     else:
-            #         loss_200_iters_ago = current_loss
-            #         current_loss = self.__loss_to_save[-1]
-
-            # if abs(current_loss - loss_200_iters_ago) < 1e-8:
-            #     self.__t_count += 1
-            #     break
 
             t += 1
             self.__t_count += 1
@@ -208,7 +228,7 @@ class TaskAllocation:
             # duration = 3
         else:
             # duration = 6
-            duration = random.randint(3, 6)
+            duration = random.randint(4, 6)
 
         # duration = (time.time() - self.__start_time) - self.failures['start_time'][-1]
         
@@ -524,13 +544,13 @@ if __name__ == "__main__":
     lr = [0.001]
     weight_decay = [0.001]
 
-    for i in range(5):
-        for learning_rate in lr:
-            for decay in weight_decay:
+    # for i in range(10):
+    for learning_rate in lr:
+        for decay in weight_decay:
 
-                performance_model_allocation = AllocationFramework(num_operators=2, num_bins=25, num_failures=40, threshold=8, lr=learning_rate, weight_decay=decay)
+            performance_model_allocation = AllocationFramework(num_operators=2, num_bins=25, num_failures=20, threshold=10, lr=learning_rate, weight_decay=decay)
 
-                performance_model_allocation.main_loop()
+            performance_model_allocation.main_loop()
 
 
 
