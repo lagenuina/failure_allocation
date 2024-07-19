@@ -95,12 +95,7 @@ class PerformanceModel(nn.Module):
                 self.calculate_performance(1, operator_number, bin_centers[bin_center_idx_1]) *
                 self.calculate_performance(2, operator_number, bin_centers[bin_center_idx_2]) *
                 self.calculate_performance(3, operator_number, bin_centers[bin_center_idx_3]))
-            
-            # performance[i] = (
-            #     self.calculate_performance(norm_lower_bound_1, norm_upper_bound_1, bin_centers[bin_center_idx_1]) *
-            #     self.calculate_performance(norm_lower_bound_2, norm_upper_bound_2, bin_centers[bin_center_idx_2]) *
-            #     self.calculate_performance(norm_lower_bound_3, norm_upper_bound_3, bin_centers[bin_center_idx_3]))
-
+          
         return performance.cuda() if torch.cuda.is_available() else performance
 
 
@@ -117,39 +112,22 @@ class PerformanceModel(nn.Module):
         x = (upper_bound - math.log(task_requirement / (1 - task_requirement))) / (upper_bound - lower_bound + 0.0001)
         
         return torch.sigmoid(x)
-    
+
     def __check_convergence(self, operator):
         norm_l1, norm_u1, norm_l2, norm_u2, norm_l3, norm_u3 = self.get_parameters(operator)
         
-        if abs(norm_u1 - norm_l1) < 0.005:
-            
-            if operator % 2 == 0:
-                if self.__local_operators[f'{operator}']['upper_bound_1'].grad is not None and self.__local_operators[f'{operator}']['lower_bound_1'].grad is not None:
-                    self.__local_operators[f'{operator}']['upper_bound_1'].requires_grad = False
-                    self.__local_operators[f'{operator}']['lower_bound_1'].requires_grad = False
-            else:
-                if self.__remote_operators[f'{operator}']['upper_bound_1'].grad is not None and self.__remote_operators[f'{operator}']['lower_bound_1'].grad is not None:
-                    self.__remote_operators[f'{operator}']['upper_bound_1'].requires_grad = False
-                    self.__remote_operators[f'{operator}']['lower_bound_1'].requires_grad = False
-        if abs(norm_u2 - norm_l2) < 0.005:
-            if operator % 2 == 0:
-                if self.__local_operators[f'{operator}']['upper_bound_2'].grad is not None and self.__local_operators[f'{operator}']['lower_bound_2'].grad is not None:
-                    self.__local_operators[f'{operator}']['upper_bound_2'].requires_grad = False
-                    self.__local_operators[f'{operator}']['lower_bound_2'].requires_grad = False
-            else:
-                if self.__remote_operators[f'{operator}']['upper_bound_2'].grad is not None and self.__remote_operators[f'{operator}']['lower_bound_2'].grad is not None:
-                    self.__remote_operators[f'{operator}']['upper_bound_2'].requires_grad = False
-                    self.__remote_operators[f'{operator}']['lower_bound_2'].requires_grad = False
-
-        if abs(norm_u3 - norm_l3) < 0.005:
-            if operator % 2 == 0:
-                if self.__local_operators[f'{operator}']['upper_bound_3'].grad is not None and self.__local_operators[f'{operator}']['lower_bound_3'].grad is not None:
-                    self.__local_operators[f'{operator}']['upper_bound_3'].requires_grad = False
-                    self.__local_operators[f'{operator}']['lower_bound_3'].requires_grad = False
-            else:
-                if self.__remote_operators[f'{operator}']['upper_bound_3'].grad is not None and self.__remote_operators[f'{operator}']['lower_bound_3'].grad is not None:
-                    self.__remote_operators[f'{operator}']['upper_bound_3'].requires_grad = False
-                    self.__remote_operators[f'{operator}']['lower_bound_3'].requires_grad = False
+        norms = [(norm_l1, norm_u1), (norm_l2, norm_u2), (norm_l3, norm_u3)]
+        bounds = ['upper_bound_1', 'lower_bound_1', 'upper_bound_2', 'lower_bound_2', 'upper_bound_3', 'lower_bound_3']
+        
+        for i, (norm_l, norm_u) in enumerate(norms):
+            if abs(norm_u - norm_l) < 0.005:
+                operators = self.__local_operators if operator % 2 == 0 else self.__remote_operators
+                upper_bound = operators[f'{operator}'][bounds[2 * i]]
+                lower_bound = operators[f'{operator}'][bounds[2 * i + 1]]
+                
+                if upper_bound.grad is not None and lower_bound.grad is not None:
+                    operators[f'{operator}'][bounds[2 * i]].requires_grad = False
+                    operators[f'{operator}'][bounds[2 * i + 1]].requires_grad = False
 
     def update(self, bin_centers, obs_probs, obs_probs_idxs, operator_number):
 
@@ -181,7 +159,6 @@ class PerformanceModel(nn.Module):
 
             predicted_values = self.forward(bin_centers, obs_probs_idxs, operator_number)
             loss = torch.mean(torch.pow((predicted_values - obs_probs_vect), 2.0))
-            self.__loss_to_save.append(loss.item())
             
             self.__check_convergence(operator_number)
 
@@ -224,33 +201,38 @@ class TaskAllocation:
     def failure_ended(self, failure_allocated):
 
         if failure_allocated % 2 == 0:
-            duration = random.randint(1, 3)
+            duration = random.randint(2, 5)
             # duration = 3
         else:
             # duration = 6
-            duration = random.randint(4, 6)
+            duration = random.randint(4, 7)
 
         # duration = (time.time() - self.__start_time) - self.failures['start_time'][-1]
         
         self.failures['duration'].append(duration)
         self.failures['end_time'].append(time.time() - self.__start_time)
 
-    def calculate_reward(self, urgency, responsiveness):
+    def calculate_reward(self, norms, task_requirement):
+        
+        performance = []
 
-        reward = (urgency * (1 + responsiveness)) / (1 + urgency)
+        for i, (lower_bound, upper_bound) in enumerate(norms):
+
+            if task_requirement[i] <= lower_bound:
+                performance.append(torch.tensor([1.0]))
+            elif task_requirement[i] > upper_bound:
+                performance.append(torch.tensor([0.0]))
+            else:
+                performance.append((upper_bound - task_requirement[i]) / (upper_bound - lower_bound + 0.0001))
+            
+        urgency = task_requirement[2]
+        responsiveness = performance[2]
+
+        reward_urgency = (urgency * (1 + responsiveness)) / (1 + urgency)
+
+        reward = performance[0] * performance[1] * reward_urgency
 
         return reward
-    
-    def calculate_reward_capability(self, lower_bound, upper_bound, task_requirement):
-
-        if task_requirement <= lower_bound:
-            performance = torch.tensor([1.0])
-        elif task_requirement > upper_bound:
-            performance = torch.tensor([0.0])
-        else:
-            performance = (upper_bound - task_requirement) / (upper_bound - lower_bound + 0.0001)
-
-        return performance.cuda() if torch.cuda.is_available() else performance
     
     def calculate_cost(self):
 
@@ -304,7 +286,6 @@ class AllocationFramework:
             keys.append(f'{i}_upper_bound_2')
             keys.append(f'{i}_lower_bound_3') 
             keys.append(f'{i}_upper_bound_3')
-            keys.append(f'{i}_reward_urgency')
             keys.append(f'{i}_reward_capabilities')
             keys.append(f'{i}_cost')
             keys.append(f'{i}_total_reward')
@@ -353,7 +334,7 @@ class AllocationFramework:
         self.__capabilities_local = {}
         self.__capabilities_remote = {}
 
-        self.__performance_index = {}
+        self.__reward_operators = {}
 
     def __assign_failure(self, expected_reward):
 
@@ -389,52 +370,42 @@ class AllocationFramework:
 
             self.__task_allocation.failure_started() #SIMULATION PURPOSES
             
-            reward_urgency = []
-
             for operator in range(self.NUM_OPERATORS):
-                norm_l1, norm_u1, norm_l2, norm_u2, norm_l3, norm_u3, = self.__model.get_parameters(operator)
+                norm_l1, norm_u1, norm_l2, norm_u2, norm_l3, norm_u3 = self.__model.get_parameters(operator)
                 
+                norms = [(norm_l1, norm_u1), (norm_l2, norm_u2), (norm_l3, norm_u3)]
+
                 if operator % 2 == 0:
                     self.__capabilities_local[operator] = {'lower_bound_1': norm_l1,
                                                     'upper_bound_1': norm_u1,
                                                     'lower_bound_2': norm_l2,
                                                     'upper_bound_2': norm_u2,
                                                     'lower_bound_3': norm_l3,
-                                                    'upper_bound_3': norm_u3,}
-                    
+                                                    'upper_bound_3': norm_u3}
+                                        
                 else:
                     self.__capabilities_remote[operator] = {'lower_bound_1': norm_l1,
                                                 'upper_bound_1': norm_u1,
                                                 'lower_bound_2': norm_l2,
                                                 'upper_bound_2': norm_u2,
                                                 'lower_bound_3': norm_l3,
-                                                'upper_bound_3': norm_u3,}
+                                                'upper_bound_3': norm_u3}
                     
-                performance_capability_1 = self.__model.calculate_performance(1, operator, self.__task_requirements[0, i])
-                performance_capability_2 = self.__model.calculate_performance(2, operator, self.__task_requirements[1, i])
-                performance_capability_3 = self.__model.calculate_performance(3, operator, self.__task_requirements[2, i])
-                # performance_capability_1 = self.__model.calculate_performance(norm_l1, norm_u1, self.__task_requirements[0, i])
-                # performance_capability_2 = self.__model.calculate_performance(norm_l2, norm_u2, self.__task_requirements[1, i])
-                # performance_capability_3 = self.__model.calculate_performance(norm_l3, norm_u3, self.__task_requirements[2, i])
-
-                reward = self.__task_allocation.calculate_reward(self.__task_requirements[2, i], performance_capability_3)
                 
-                reward_urgency.append(reward)
-                self.__performance_index[operator] = performance_capability_1 * performance_capability_2 * reward
-
+                self.__reward_operators[operator] = self.__task_allocation.calculate_reward(norms, self.__task_requirements[:,i])
+                
             if torch.cuda.is_available():
-                self.__performance_index = {key: value.cuda() for key, value in self.__performance_index.items()}
+                self.__reward_operators = {key: value.cuda() for key, value in self.__reward_operators.items()}
 
             cost =  self.__task_allocation.calculate_cost()
 
             expected_reward = []
             for operator in range(self.NUM_OPERATORS):
-                expected_reward.append(self.__performance_index[operator] - cost[operator])
+                expected_reward.append(self.__reward_operators[operator] - cost[operator])
 
             assigned_to = self.__assign_failure(expected_reward)
 
             adjusted_threshold = self.THRESHOLD/(1 + self.__task_requirements[2, i])
-            # adjusted_threshold = self.THRESHOLD
 
             for j in range(self.NUM_BINS):
                 for k in range(self.NUM_BINS):
@@ -469,12 +440,12 @@ class AllocationFramework:
                 self.probabilities_index_remote = np.array([[j, k, z] for j in range(self.NUM_BINS) for k in range(self.NUM_BINS) for z in range(self.NUM_BINS) if self.__total_observations_remote[assigned_to][j, k, z] > 0])
                 self.__model.update(self.bin_centers, self.observations_probabilities_remote[assigned_to], self.probabilities_index_remote, assigned_to)
 
-            self.save_results(reward_urgency, self.__performance_index, cost, expected_reward)
+            self.save_results(self.__reward_operators, cost, expected_reward)
 
         self.save_other_results()
         self.write_results()
     
-    def save_results(self, reward_urgency, reward_capabilities, cost, total_reward):
+    def save_results(self, reward_capabilities, cost, total_reward):
 
         for operator in range(self.NUM_OPERATORS):
             norm_l1, norm_u1, norm_l2, norm_u2, norm_l3, norm_u3 = self.__model.get_parameters(operator)
@@ -485,7 +456,6 @@ class AllocationFramework:
             self.__results[f'{operator}_upper_bound_2'].append(norm_u2.item())
             self.__results[f'{operator}_lower_bound_3'].append(norm_l3.item())
             self.__results[f'{operator}_upper_bound_3'].append(norm_u3.item())
-            self.__results[f'{operator}_reward_urgency'].append(reward_urgency[operator].item())
             self.__results[f'{operator}_reward_capabilities'].append((reward_capabilities[operator]).item())
             self.__results[f'{operator}_cost'].append(cost[operator])
             self.__results[f'{operator}_total_reward'].append(total_reward[operator].item())
@@ -538,19 +508,19 @@ if __name__ == "__main__":
     num_bins = 25
     num_failures = 40
     threshold = 6
-    # lr = [0.01, 0.005, 0.001, 0.0005, 0.0001]
+    # lr = [0.01, 0.005, 0.002]
     # weight_decay = [0.0, 0.000001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01]
     
-    lr = [0.001]
+    lr = [0.002]
     weight_decay = [0.001]
 
-    # for i in range(10):
-    for learning_rate in lr:
-        for decay in weight_decay:
+    for i in range(1):
+        for learning_rate in lr:
+            for decay in weight_decay:
 
-            performance_model_allocation = AllocationFramework(num_operators=2, num_bins=25, num_failures=20, threshold=10, lr=learning_rate, weight_decay=decay)
+                performance_model_allocation = AllocationFramework(num_operators=2, num_bins=25, num_failures=30, threshold=10, lr=learning_rate, weight_decay=decay)
 
-            performance_model_allocation.main_loop()
+                performance_model_allocation.main_loop()
 
 
 
