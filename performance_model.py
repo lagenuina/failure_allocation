@@ -80,13 +80,13 @@ class PerformanceModel(nn.Module):
         norm_lower_bound_3 = sigmoid(params['lower_bound_3'])
         norm_upper_bound_3 = sigmoid(params['upper_bound_3'])
 
-        return norm_lower_bound_1, norm_upper_bound_1, norm_lower_bound_2, norm_upper_bound_2, norm_lower_bound_3, norm_upper_bound_3
+        norms = [(norm_lower_bound_1, norm_upper_bound_1), (norm_lower_bound_2, norm_upper_bound_2), (norm_lower_bound_3, norm_upper_bound_3)]
+        return norms
     
     def forward(self, bin_centers, observation_probability_index, operator_number):
         
         n_diffs = observation_probability_index.shape[0]
         performance = torch.zeros(n_diffs)
-        norm_lower_bound_1, norm_upper_bound_1, norm_lower_bound_2, norm_upper_bound_2, norm_lower_bound_3, norm_upper_bound_3 = self.get_parameters(operator_number)
 
         for i in range(n_diffs):
             bin_center_idx_1, bin_center_idx_2, bin_center_idx_3 = observation_probability_index[i]
@@ -97,7 +97,6 @@ class PerformanceModel(nn.Module):
                 self.calculate_performance(3, operator_number, bin_centers[bin_center_idx_3]))
           
         return performance.cuda() if torch.cuda.is_available() else performance
-
 
     def calculate_performance(self, number, operator_number, task_requirement):
         
@@ -114,9 +113,8 @@ class PerformanceModel(nn.Module):
         return torch.sigmoid(x)
 
     def __check_convergence(self, operator):
-        norm_l1, norm_u1, norm_l2, norm_u2, norm_l3, norm_u3 = self.get_parameters(operator)
+        norms = self.get_parameters(operator)
         
-        norms = [(norm_l1, norm_u1), (norm_l2, norm_u2), (norm_l3, norm_u3)]
         bounds = ['upper_bound_1', 'lower_bound_1', 'upper_bound_2', 'lower_bound_2', 'upper_bound_3', 'lower_bound_3']
         
         for i, (norm_l, norm_u) in enumerate(norms):
@@ -169,93 +167,6 @@ class PerformanceModel(nn.Module):
             t += 1
             self.__t_count += 1
 
-class TaskAllocation:
-    def __init__(self, num_operators, threshold):
-
-        self.NUM_OPERATORS = num_operators
-        self.THRESHOLD = threshold
-
-        self.__start_time_failure = 0
-        self.failure_counter = 0
-        self.task_allocation = []
-
-        self.failures = {
-            'start_time': [],
-            'end_time': [],
-            'duration': [], 
-            'resolution_start_time': []
-        }
-
-        self.__primary_task_start_time = {i: [] for i in range(self.NUM_OPERATORS)}
-
-        #FOR SIMULATING
-        self.__start_time = time.time()
-        for i in range(self.NUM_OPERATORS):
-            self.__primary_task_start_time[i].append(time.time() - self.__start_time)
-
-    def failure_started(self):
-
-        self.__start_time_failure = time.time() - self.__start_time
-        self.failures['start_time'].append(self.__start_time_failure)
-
-    def failure_ended(self, failure_allocated):
-
-        if failure_allocated % 2 == 0:
-            duration = random.randint(2, 5)
-            # duration = 3
-        else:
-            # duration = 6
-            duration = random.randint(4, 7)
-
-        # duration = (time.time() - self.__start_time) - self.failures['start_time'][-1]
-        
-        self.failures['duration'].append(duration)
-        self.failures['end_time'].append(time.time() - self.__start_time)
-
-    def calculate_reward(self, norms, task_requirement):
-        
-        performance = []
-
-        for i, (lower_bound, upper_bound) in enumerate(norms):
-
-            if task_requirement[i] <= lower_bound:
-                performance.append(torch.tensor([1.0]))
-            elif task_requirement[i] > upper_bound:
-                performance.append(torch.tensor([0.0]))
-            else:
-                performance.append((upper_bound - task_requirement[i]) / (upper_bound - lower_bound + 0.0001))
-            
-        urgency = task_requirement[2]
-        responsiveness = performance[2]
-
-        reward_urgency = (urgency * (1 + responsiveness)) / (1 + urgency)
-
-        reward = performance[0] * performance[1] * reward_urgency
-
-        return reward
-    
-    def calculate_cost(self):
-
-        cost = []
-        total_time_failures = sum(self.failures['duration'])
-
-        for i in range(self.NUM_OPERATORS):
-            operator_time_failures = 0
-            
-            if self.failure_counter != 0:
-                for j in range(self.failure_counter):
-                    if self.task_allocation[j] == i:
-                        operator_time_failures += self.failures['duration'][j]
-
-                ratio_failures = (operator_time_failures/total_time_failures)
-                cost.append(ratio_failures)
-            else:
-                cost = np.zeros(self.NUM_OPERATORS)
-
-        self.failure_counter += 1
-
-        return cost
-    
 class AllocationFramework:
     def __init__(self, num_operators, num_bins, num_failures, threshold, lr, weight_decay):
         
@@ -268,29 +179,14 @@ class AllocationFramework:
         self.LR = lr
         self.DECAY = weight_decay
 
-        self.__task_allocation = TaskAllocation(self.NUM_OPERATORS, self.THRESHOLD)
         self.__model = PerformanceModel(self.NUM_OPERATORS, self.LR, self.DECAY)
         self.__model = self.__model.cuda() if torch.cuda.is_available() else self.__model
+        self.__data_recorder = DataRecorder(self.NUM_OPERATORS, self.NUM_FAILURES, self.THRESHOLD, self.LR, self.DECAY)
+
 
         self.__bin_limits = dtype(np.concatenate([[0], np.linspace(1 / self.NUM_BINS, 1.0, self.NUM_BINS)]))
         self.bin_centers = dtype((self.__bin_limits[:-1] + self.__bin_limits[1:]) / 2.0)
 
-        self.__workload = {}
-
-        keys = []
-        for i in range(self.NUM_OPERATORS):
-            self.__workload[i] = 0
-            keys.append(f'{i}_lower_bound_1') 
-            keys.append(f'{i}_upper_bound_1') 
-            keys.append(f'{i}_lower_bound_2') 
-            keys.append(f'{i}_upper_bound_2')
-            keys.append(f'{i}_lower_bound_3') 
-            keys.append(f'{i}_upper_bound_3')
-            keys.append(f'{i}_reward_capabilities')
-            keys.append(f'{i}_cost')
-            keys.append(f'{i}_total_reward')
-        
-        self.__results = {key: [] for key in keys}
         self.__total_observations_local = {}
         self.__total_observations_remote = {}
 
@@ -307,6 +203,29 @@ class AllocationFramework:
 
         self.__failures_assigned = {}
         
+        self.__start_time_failure = 0
+        self.failure_counter = 0
+        self.task_allocation = []
+        self.__adjusted_threshold = 0
+
+        self.__failures = {
+            'start_time': [],
+            'end_time': [],
+            'duration': [], 
+            'resolution_start_time': []
+        }
+
+        self.__primary_task_start_time = {i: [] for i in range(self.NUM_OPERATORS)}
+        self.__reward_capability_1 = {i: 0 for i in range(self.NUM_OPERATORS)}
+        self.__reward_capability_2 = {i: 0 for i in range(self.NUM_OPERATORS)}
+        self.__reward_capability_3 = {i: 0 for i in range(self.NUM_OPERATORS)}
+        self.__cost = {i: 0 for i in range(self.NUM_OPERATORS)}
+        self.__operator_time_failures = {i: 0 for i in range(self.NUM_OPERATORS)}
+
+        #FOR SIMULATING
+        self.__start_time = time.time()
+        for i in range(self.NUM_OPERATORS):
+            self.__primary_task_start_time[i].append(time.time() - self.__start_time)
 
         for i in range(self.NUM_OPERATORS):  
             operator_number = i
@@ -331,20 +250,24 @@ class AllocationFramework:
         data_frame = pd.read_csv(load_file_name, header=None)
         self.__task_requirements = data_frame.iloc[:, :self.NUM_FAILURES].values
 
-        self.__capabilities_local = {}
-        self.__capabilities_remote = {}
+        self.__capabilities = {}
 
         self.__reward_operators = {}
+        self.__expected_reward = {}
+
 
     def __assign_failure(self, expected_reward):
 
-        expected_rewards_tensor = torch.stack(expected_reward)
+        reward_tensors = list(expected_reward.values())
+
+        # Concatenate tensors into a single tensor
+        concatenated_tensor = torch.cat(reward_tensors)
         
         # Find the maximum value in the tensor
-        highest_reward = expected_rewards_tensor.max().item()
+        highest_reward = concatenated_tensor.max().item()
         
         # Find all indices with the maximum value
-        operators_highest_reward = (expected_rewards_tensor == highest_reward).nonzero(as_tuple=True)[0].tolist()
+        operators_highest_reward = (concatenated_tensor == highest_reward).nonzero(as_tuple=True)[0].tolist()
         if len(operators_highest_reward) > 1:
 
             # Assign to the operator with least amount of failures
@@ -355,57 +278,111 @@ class AllocationFramework:
 
         self.__failures_assigned[failure_allocated_to] += 1
 
-        self.__task_allocation.task_allocation.append(failure_allocated_to)
+        self.task_allocation.append(failure_allocated_to)
 
-        self.__task_allocation.failure_ended(failure_allocated_to)
+        self.__failure_ended(failure_allocated_to)
         print("\n")
 
         return failure_allocated_to
 
+    def __failure_started(self):
+
+        self.__start_time_failure = time.time() - self.__start_time
+        self.__failures['start_time'].append(self.__start_time_failure)
+
+    def __failure_ended(self, failure_allocated):
+
+        if failure_allocated % 2 == 0:
+            duration = random.randint(4, 6)
+            # duration = 3
+        else:
+            # duration = 6
+            duration = random.randint(6, 8)
+
+        # duration = (time.time() - self.__start_time) - self.__failures['start_time'][-1]
+        
+        self.__failures['duration'].append(duration)
+        self.__failures['end_time'].append(time.time() - self.__start_time)
+
+    def calculate_reward(self, norms, task_requirement, operator):
+        
+        performance = []
+
+        for i, (lower_bound, upper_bound) in enumerate(norms):
+
+            # if i != 2:
+            if task_requirement[i] <= lower_bound:
+                performance.append(torch.tensor([1.0]))
+            elif task_requirement[i] > upper_bound:
+                performance.append(torch.tensor([0.0]))
+            else:
+                performance.append((upper_bound - task_requirement[i]) / (upper_bound - lower_bound + 0.0001))
+            # else:
+            #     performance.append((upper_bound + lower_bound) / 2)
+                
+        urgency = task_requirement[2]
+        responsiveness = performance[2]
+
+        self.__reward_capability_1[operator] = performance[0]
+        self.__reward_capability_2[operator] = performance[1]
+        # self.__reward_capability_3[operator] = (urgency * (1 + responsiveness)) / (1 + urgency)
+        self.__reward_capability_3[operator] = performance[2]
+
+        return 0.3 * self.__reward_capability_1[operator] + 0.3 * self.__reward_capability_2[operator] + 0.4 * self.__reward_capability_3[operator]
+    
+    def calculate_cost(self):
+
+        cost = []
+        total_time_failures = sum(self.__failures['duration'])
+
+        for i in range(self.NUM_OPERATORS):
+            self.__operator_time_failures[i] = 0
+            
+            if self.failure_counter != 0:
+                for j in range(self.failure_counter):
+                    if self.task_allocation[j] == i:
+                        self.__operator_time_failures[i] += self.__failures['duration'][j]
+
+                ratio_failures = (self.__operator_time_failures[i]/total_time_failures)
+                cost.append(ratio_failures)
+            else:
+                cost = np.zeros(self.NUM_OPERATORS)
+
+        self.failure_counter += 1
+
+        return [i * 0.7 for i in cost]
+    
     def main_loop(self):
 
         for i in range(self.NUM_FAILURES):
             print("Failure", i)
             print(self.__failures_assigned)
 
-            self.__task_allocation.failure_started() #SIMULATION PURPOSES
+            self.__failure_started() #SIMULATION PURPOSES
             
             for operator in range(self.NUM_OPERATORS):
-                norm_l1, norm_u1, norm_l2, norm_u2, norm_l3, norm_u3 = self.__model.get_parameters(operator)
+                norms = self.__model.get_parameters(operator)
                 
-                norms = [(norm_l1, norm_u1), (norm_l2, norm_u2), (norm_l3, norm_u3)]
-
-                if operator % 2 == 0:
-                    self.__capabilities_local[operator] = {'lower_bound_1': norm_l1,
-                                                    'upper_bound_1': norm_u1,
-                                                    'lower_bound_2': norm_l2,
-                                                    'upper_bound_2': norm_u2,
-                                                    'lower_bound_3': norm_l3,
-                                                    'upper_bound_3': norm_u3}
-                                        
-                else:
-                    self.__capabilities_remote[operator] = {'lower_bound_1': norm_l1,
-                                                'upper_bound_1': norm_u1,
-                                                'lower_bound_2': norm_l2,
-                                                'upper_bound_2': norm_u2,
-                                                'lower_bound_3': norm_l3,
-                                                'upper_bound_3': norm_u3}
+                self.__capabilities[operator] = {'lower_bound_1': norms[0][0],
+                                                'upper_bound_1': norms[0][1],
+                                                'lower_bound_2': norms[1][0],
+                                                'upper_bound_2': norms[1][1],
+                                                'lower_bound_3': norms[2][0],
+                                                'upper_bound_3': norms[2][1]}
                     
-                
-                self.__reward_operators[operator] = self.__task_allocation.calculate_reward(norms, self.__task_requirements[:,i])
+                self.__reward_operators[operator] = self.calculate_reward(norms, self.__task_requirements[:,i], operator)
                 
             if torch.cuda.is_available():
                 self.__reward_operators = {key: value.cuda() for key, value in self.__reward_operators.items()}
 
-            cost =  self.__task_allocation.calculate_cost()
+            self.__cost =  self.calculate_cost()
 
-            expected_reward = []
             for operator in range(self.NUM_OPERATORS):
-                expected_reward.append(self.__reward_operators[operator] - cost[operator])
+                self.__expected_reward[operator] = self.__reward_operators[operator] - self.__cost[operator]
 
-            assigned_to = self.__assign_failure(expected_reward)
+            assigned_to = self.__assign_failure(self.__expected_reward)
 
-            adjusted_threshold = self.THRESHOLD/(1 + self.__task_requirements[2, i])
+            self.__adjusted_threshold = self.THRESHOLD/(1 + self.__task_requirements[2, i])
 
             for j in range(self.NUM_BINS):
                 for k in range(self.NUM_BINS):
@@ -416,14 +393,14 @@ class AllocationFramework:
                             
                             if assigned_to % 2 == 0:
 
-                                if self.__task_allocation.failures['duration'][-1] < adjusted_threshold:
+                                if self.__failures['duration'][-1] < self.__adjusted_threshold:
                                     self.__success_local[assigned_to][j, k, z] += 1
 
                                 self.__total_observations_local[assigned_to][j, k, z] += 1
 
                             else:
 
-                                if self.__task_allocation.failures['duration'][-1] < adjusted_threshold:
+                                if self.__failures['duration'][-1] < self.__adjusted_threshold:
                                     self.__success_remote[assigned_to][j, k, z] += 1
 
                                 self.__total_observations_remote[assigned_to][j, k, z] += 1
@@ -440,36 +417,104 @@ class AllocationFramework:
                 self.probabilities_index_remote = np.array([[j, k, z] for j in range(self.NUM_BINS) for k in range(self.NUM_BINS) for z in range(self.NUM_BINS) if self.__total_observations_remote[assigned_to][j, k, z] > 0])
                 self.__model.update(self.bin_centers, self.observations_probabilities_remote[assigned_to], self.probabilities_index_remote, assigned_to)
 
-            self.save_results(self.__reward_operators, cost, expected_reward)
-
-        self.save_other_results()
-        self.write_results()
+            self.__data_recorder.save_results(i, 
+                                            assigned_to,
+                                            self.__failures['start_time'][-1],
+                                            self.__failures['duration'][-1],
+                                            self.__adjusted_threshold,
+                                            self.__task_requirements[:,i],
+                                            self.__capabilities,
+                                            self.__reward_capability_1, 
+                                            self.__reward_capability_2, 
+                                            self.__reward_capability_3,
+                                            self.__cost,
+                                            self.__expected_reward,
+                                            self.__failures_assigned,
+                                            self.__operator_time_failures
+                                            )
+            
+        self.__data_recorder.write_results()
+        
+class DataRecorder:
+    def __init__(self, num_operators, num_failures, threshold, lr, weight_decay):
     
-    def save_results(self, reward_capabilities, cost, total_reward):
+        self.NUM_OPERATORS = num_operators
+        self.NUM_FAILURES = num_failures
+        self.THRESHOLD = threshold
+        self.LR = lr
+        self.DECAY = weight_decay
+
+        keys = ['failure_id', 
+                'assigned_to', 
+                'start_time', 
+                'duration',
+                'success',
+                'requirement_1',
+                'requirement_2',
+                'requirement_3',
+                'num_operators', 
+                'num_failures',
+                'threshold',
+                'learning_rate',
+                'weight_decay']
+        
+        for i in range(self.NUM_OPERATORS):
+            keys.append(f'{i}_lower_bound_1') 
+            keys.append(f'{i}_upper_bound_1') 
+            keys.append(f'{i}_lower_bound_2') 
+            keys.append(f'{i}_upper_bound_2')
+            keys.append(f'{i}_lower_bound_3') 
+            keys.append(f'{i}_upper_bound_3')
+            keys.append(f'{i}_cost')
+            keys.append(f'{i}_reward_capability_1')
+            keys.append(f'{i}_reward_capability_2')
+            keys.append(f'{i}_reward_capability_3')
+            keys.append(f'{i}_total_reward')
+            keys.append(f'{i}_assigned_failures')
+            keys.append(f'{i}_time_spent_failures')
+        
+        self.__results = {key: [] for key in keys}
+
+    def save_results(self, failure_id, assigned_to, start_time, duration, threshold, task_requirements, norms, reward_capability_1, reward_capability_2, reward_capability_3, cost, reward_operators, failures_assigned, operator_time_failures):
+
+        self.__results['failure_id'].append(failure_id)
+        self.__results['assigned_to'].append(assigned_to)
+        self.__results['start_time'].append(start_time)
+        self.__results['duration'].append(duration)
+        self.__results['requirement_1'].append(task_requirements[0])
+        self.__results['requirement_2'].append(task_requirements[1])
+        self.__results['requirement_3'].append(task_requirements[2])
+        self.__results['num_operators'].append(self.NUM_OPERATORS)
+        self.__results['num_failures'].append(self.NUM_FAILURES)
+        self.__results['threshold'].append(threshold)
+        self.__results['learning_rate'].append(self.LR)
+        self.__results['weight_decay'].append(self.DECAY)
+
+        if duration < threshold:
+            self.__results['success'].append(True)
+        else:
+            self.__results['success'].append(False)
 
         for operator in range(self.NUM_OPERATORS):
-            norm_l1, norm_u1, norm_l2, norm_u2, norm_l3, norm_u3 = self.__model.get_parameters(operator)
 
-            self.__results[f'{operator}_lower_bound_1'].append(norm_l1.item())
-            self.__results[f'{operator}_upper_bound_1'].append(norm_u1.item())
-            self.__results[f'{operator}_lower_bound_2'].append(norm_l2.item())
-            self.__results[f'{operator}_upper_bound_2'].append(norm_u2.item())
-            self.__results[f'{operator}_lower_bound_3'].append(norm_l3.item())
-            self.__results[f'{operator}_upper_bound_3'].append(norm_u3.item())
-            self.__results[f'{operator}_reward_capabilities'].append((reward_capabilities[operator]).item())
+            self.__results[f'{operator}_lower_bound_1'].append(norms[operator]['lower_bound_1'].item())
+            self.__results[f'{operator}_upper_bound_1'].append(norms[operator]['upper_bound_1'].item())
+            self.__results[f'{operator}_lower_bound_2'].append(norms[operator]['lower_bound_2'].item())
+            self.__results[f'{operator}_upper_bound_2'].append(norms[operator]['upper_bound_2'].item())
+            self.__results[f'{operator}_lower_bound_3'].append(norms[operator]['lower_bound_3'].item())
+            self.__results[f'{operator}_upper_bound_3'].append(norms[operator]['upper_bound_3'].item())
             self.__results[f'{operator}_cost'].append(cost[operator])
-            self.__results[f'{operator}_total_reward'].append(total_reward[operator].item())
-
-    def save_other_results(self):
-
-        self.__results['failures_duration'] = self.__task_allocation.failures['duration']
-        self.__results['assigned'] = self.__task_allocation.task_allocation
+            self.__results[f'{operator}_reward_capability_1'].append((reward_capability_1[operator]).item())
+            self.__results[f'{operator}_reward_capability_2'].append((reward_capability_2[operator]).item())
+            self.__results[f'{operator}_reward_capability_3'].append((reward_capability_3[operator]).item())
+            self.__results[f'{operator}_total_reward'].append(reward_operators[operator].item())
+            self.__results[f'{operator}_assigned_failures'].append(failures_assigned[operator])
+            self.__results[f'{operator}_time_spent_failures'].append(operator_time_failures[operator])
 
     def write_results(self):
 
         # Determine the filename
-        # base_filename = f'{self.NUM_OPERATORS}_operators_{self.NUM_FAILURES}_failures.csv'
-        base_filename = f'lr_{self.LR}_w_{self.DECAY}_operators_{self.NUM_OPERATORS}_failures_{self.NUM_FAILURES}.csv'
+        base_filename = f'{self.NUM_OPERATORS}_operators_{self.NUM_FAILURES}_failures.csv'
         results_dir = 'results'  # Directory to save results
         filename = os.path.join(results_dir, base_filename)
 
@@ -500,27 +545,21 @@ class AllocationFramework:
             for i in range(max_length):
                 row = [self.__results[key][i] if i < len(self.__results[key]) else None for key in headers]
                 writer.writerow(row)
-                    
 
 if __name__ == "__main__":
 
-    num_operators = 2
-    num_bins = 25
-    num_failures = 40
-    threshold = 6
-    # lr = [0.01, 0.005, 0.002]
-    # weight_decay = [0.0, 0.000001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01]
-    
-    lr = [0.002]
-    weight_decay = [0.001]
+    operators_array = [2, 2, 2, 2]
+    bins = 25
+    failures = 50
+    max_threshold = 10
 
-    for i in range(1):
-        for learning_rate in lr:
-            for decay in weight_decay:
+    learning_rate = 0.001
+    decay = 0.001
 
-                performance_model_allocation = AllocationFramework(num_operators=2, num_bins=25, num_failures=30, threshold=10, lr=learning_rate, weight_decay=decay)
-
-                performance_model_allocation.main_loop()
+    for i in range(3):
+        for operators in operators_array:
+            performance_model_allocation = AllocationFramework(num_operators=operators, num_bins=bins, num_failures=failures, threshold=max_threshold, lr=learning_rate, weight_decay=decay)
+            performance_model_allocation.main_loop()
 
 
 
