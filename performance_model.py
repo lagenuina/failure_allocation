@@ -197,6 +197,7 @@ class AllocationFramework:
         self.__success_remote = {}
         self.observations_probabilities_local = {}
         self.observations_probabilities_remote = {}
+        self.success_matrix = {}
 
         self.probabilities_index_local = []
         self.probabilities_index_remote = []
@@ -221,6 +222,9 @@ class AllocationFramework:
         self.__reward_capability_3 = {i: 0 for i in range(self.NUM_OPERATORS)}
         self.__cost = {i: 0 for i in range(self.NUM_OPERATORS)}
         self.__operator_time_failures = {i: 0 for i in range(self.NUM_OPERATORS)}
+        self.__operator_speed = {i: [] for i in range(self.NUM_OPERATORS)}
+        self.total = {i: 0 for i in range(self.NUM_OPERATORS)}
+        self.success = {i: 0 for i in range(self.NUM_OPERATORS)}
 
         #FOR SIMULATING
         self.__start_time = time.time()
@@ -231,6 +235,7 @@ class AllocationFramework:
             operator_number = i
 
             self.__failures_assigned[operator_number] = 0
+            self.success_matrix[operator_number] = np.ones((self.NUM_BINS, self.NUM_BINS,  self.NUM_BINS)) 
 
             # Local operators have even number indexes
             if operator_number % 2 == 0:
@@ -293,11 +298,11 @@ class AllocationFramework:
     def __failure_ended(self, failure_allocated):
 
         if failure_allocated % 2 == 0:
-            duration = random.randint(4, 6)
+            duration = random.randint(3, 6)
             # duration = 3
         else:
             # duration = 6
-            duration = random.randint(6, 8)
+            duration = random.randint(5, 8)
 
         # duration = (time.time() - self.__start_time) - self.__failures['start_time'][-1]
         
@@ -310,25 +315,21 @@ class AllocationFramework:
 
         for i, (lower_bound, upper_bound) in enumerate(norms):
 
-            # if i != 2:
             if task_requirement[i] <= lower_bound:
                 performance.append(torch.tensor([1.0]))
             elif task_requirement[i] > upper_bound:
                 performance.append(torch.tensor([0.0]))
             else:
                 performance.append((upper_bound - task_requirement[i]) / (upper_bound - lower_bound + 0.0001))
-            # else:
-            #     performance.append((upper_bound + lower_bound) / 2)
                 
-        urgency = task_requirement[2]
-        responsiveness = performance[2]
-
         self.__reward_capability_1[operator] = performance[0]
         self.__reward_capability_2[operator] = performance[1]
-        # self.__reward_capability_3[operator] = (urgency * (1 + responsiveness)) / (1 + urgency)
         self.__reward_capability_3[operator] = performance[2]
+        
+        reward_capability = 0.3 * self.__reward_capability_1[operator] + 0.3 * self.__reward_capability_2[operator] + 0.4 * self.__reward_capability_3[operator]
+        # reward_capability = self.__reward_capability_1[operator] * self.__reward_capability_2[operator] * self.__reward_capability_3[operator]
 
-        return 0.3 * self.__reward_capability_1[operator] + 0.3 * self.__reward_capability_2[operator] + 0.4 * self.__reward_capability_3[operator]
+        return reward_capability
     
     def calculate_cost(self):
 
@@ -350,7 +351,7 @@ class AllocationFramework:
 
         self.failure_counter += 1
 
-        return [i * 0.7 for i in cost]
+        return cost
     
     def main_loop(self):
 
@@ -378,11 +379,24 @@ class AllocationFramework:
             self.__cost =  self.calculate_cost()
 
             for operator in range(self.NUM_OPERATORS):
-                self.__expected_reward[operator] = self.__reward_operators[operator] - self.__cost[operator]
+        
+                speed = sum(self.__operator_speed[operator])/(len(self.__operator_speed[operator]) + 0.0000001)
+                
+                reward_speed = (self.__task_requirements[2, i] * (1 + speed)) / (1 + self.__task_requirements[2, i])
+
+                self.__expected_reward[operator] = self.__reward_operators[operator] * (reward_speed - self.__cost[operator])
+
+                print(reward_speed, self.__cost[operator])
 
             assigned_to = self.__assign_failure(self.__expected_reward)
 
             self.__adjusted_threshold = self.THRESHOLD/(1 + self.__task_requirements[2, i])
+
+            if self.__failures['duration'][-1] < self.THRESHOLD:
+                speed = 1 - (self.__failures['duration'][-1]/self.THRESHOLD)
+            else: speed = 0
+
+            self.__operator_speed[assigned_to].append(speed)
 
             for j in range(self.NUM_BINS):
                 for k in range(self.NUM_BINS):
@@ -395,6 +409,7 @@ class AllocationFramework:
 
                                 if self.__failures['duration'][-1] < self.__adjusted_threshold:
                                     self.__success_local[assigned_to][j, k, z] += 1
+                                    self.success[assigned_to]+=1
 
                                 self.__total_observations_local[assigned_to][j, k, z] += 1
 
@@ -402,15 +417,18 @@ class AllocationFramework:
 
                                 if self.__failures['duration'][-1] < self.__adjusted_threshold:
                                     self.__success_remote[assigned_to][j, k, z] += 1
+                                    self.success[assigned_to]+=1
 
                                 self.__total_observations_remote[assigned_to][j, k, z] += 1
 
+                            self.total[assigned_to]+=1
 
             if assigned_to % 2 == 0:
                 self.observations_probabilities_local[assigned_to] = np.divide(self.__success_local[assigned_to], self.__total_observations_local[assigned_to], where=self.__total_observations_local[assigned_to] != 0)
 
                 self.probabilities_index_local = np.array([[j, k, z] for j in range(self.NUM_BINS) for k in range(self.NUM_BINS) for z in range(self.NUM_BINS) if self.__total_observations_local[assigned_to][j, k, z] > 0])
                 self.__model.update(self.bin_centers, self.observations_probabilities_local[assigned_to], self.probabilities_index_local, assigned_to)
+
             else:
                 self.observations_probabilities_remote[assigned_to] = np.divide(self.__success_remote[assigned_to], self.__total_observations_remote[assigned_to], where=self.__total_observations_remote[assigned_to] != 0)
 
@@ -548,15 +566,15 @@ class DataRecorder:
 
 if __name__ == "__main__":
 
-    operators_array = [2, 2, 2, 2]
+    operators_array = [2]
     bins = 25
-    failures = 50
+    failures = 30
     max_threshold = 10
 
     learning_rate = 0.001
     decay = 0.001
 
-    for i in range(3):
+    for i in range(1):
         for operators in operators_array:
             performance_model_allocation = AllocationFramework(num_operators=operators, num_bins=bins, num_failures=failures, threshold=max_threshold, lr=learning_rate, weight_decay=decay)
             performance_model_allocation.main_loop()
