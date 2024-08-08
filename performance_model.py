@@ -298,11 +298,12 @@ class AllocationFramework:
     def __failure_ended(self, failure_allocated):
 
         if failure_allocated % 2 == 0:
-            duration = random.randint(3, 6)
+            # duration = random.randint(10, 100)
+            duration = random.randint(10, 50)
             # duration = 3
         else:
             # duration = 6
-            duration = random.randint(5, 8)
+            duration = random.randint(40, 90)
 
         # duration = (time.time() - self.__start_time) - self.__failures['start_time'][-1]
         
@@ -385,8 +386,6 @@ class AllocationFramework:
                 reward_speed = (self.__task_requirements[2, i] * (1 + speed)) / (1 + self.__task_requirements[2, i])
 
                 self.__expected_reward[operator] = self.__reward_operators[operator] * (reward_speed - self.__cost[operator])
-
-                print(reward_speed, self.__cost[operator])
 
             assigned_to = self.__assign_failure(self.__expected_reward)
 
@@ -568,13 +567,13 @@ if __name__ == "__main__":
 
     operators_array = [2]
     bins = 25
-    failures = 30
-    max_threshold = 10
+    failures = 50
+    max_threshold = 100
 
     learning_rate = 0.001
     decay = 0.001
 
-    for i in range(1):
+    for i in range(10):
         for operators in operators_array:
             performance_model_allocation = AllocationFramework(num_operators=operators, num_bins=bins, num_failures=failures, threshold=max_threshold, lr=learning_rate, weight_decay=decay)
             performance_model_allocation.main_loop()
