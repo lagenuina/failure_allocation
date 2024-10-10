@@ -4,15 +4,13 @@ import torch
 from torch import nn, sigmoid
 from torch.nn import Parameter, ParameterDict
 
-import csv
-import os
 import numpy as np
 import time
 import pandas as pd
 import math
 import random
 
-from std_msgs.msg import (Int32, Float32)
+from std_msgs.msg import (Int32, Bool, Float32, Float32MultiArray)
 from std_srvs.srv import (Empty)
 from Scripts.srv import (ReceiveInt)
 
@@ -23,10 +21,15 @@ dtype = torch.cuda.FloatTensor if torch.cuda.is_available(
 
 class PerformanceModel(nn.Module):
 
-    def __init__(self, operator, lr, weight_decay):
+    def __init__(
+        self,
+        num_operators,
+        lr,
+        weight_decay,
+    ):
         super(PerformanceModel, self).__init__()
 
-        self.OPERATOR = operator
+        self.OPERATORS = range(1, num_operators + 1)
         self.__local_operators = nn.ModuleDict()
         self.__remote_operators = nn.ModuleDict()
 
@@ -35,34 +38,90 @@ class PerformanceModel(nn.Module):
         self.DECAY = weight_decay
 
         # Changed initialization of local and remote operators
+        for operator_number in self.OPERATORS:
 
-        operator_params = {
-            'lower_bound_1':
-                Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True),
-            'upper_bound_1':
-                Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
-            'lower_bound_2':
-                Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True),
-            'upper_bound_2':
-                Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
-            'lower_bound_3':
-                Parameter(dtype(-10.0 * np.ones(1)), requires_grad=True),
-            'upper_bound_3':
-                Parameter(dtype(10.0 * np.ones(1)), requires_grad=True)
-        }
+            if operator_number % 2 == 0:
+                operator_params = {
+                    'lower_bound_1':
+                        Parameter(
+                            dtype(-10.0 * np.ones(1)), requires_grad=True
+                        ),
+                    'upper_bound_1':
+                        Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
+                    'lower_bound_2':
+                        Parameter(
+                            dtype(-10.0 * np.ones(1)), requires_grad=True
+                        ),
+                    'upper_bound_2':
+                        Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
+                    'lower_bound_3':
+                        Parameter(
+                            dtype(-10.0 * np.ones(1)), requires_grad=True
+                        ),
+                    'upper_bound_3':
+                        Parameter(dtype(10.0 * np.ones(1)), requires_grad=True)
+                }
+            else:
+                operator_params = {
+                    'lower_bound_1':
+                        Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
+                    'upper_bound_1':
+                        Parameter(
+                            dtype(-10.0 * np.ones(1)), requires_grad=True
+                        ),
+                    'lower_bound_2':
+                        Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
+                    'upper_bound_2':
+                        Parameter(
+                            dtype(-10.0 * np.ones(1)), requires_grad=True
+                        ),
+                    'lower_bound_3':
+                        Parameter(dtype(10.0 * np.ones(1)), requires_grad=True),
+                    'upper_bound_3':
+                        Parameter(
+                            dtype(-10.0 * np.ones(1)), requires_grad=True
+                        ),
+                }
 
-        if self.OPERATOR % 2 == 0:
-            self.__local_operators[f'{self.OPERATOR}'] = ParameterDict(
-                operator_params
-            )
-        else:
-            self.__remote_operators[f'{self.OPERATOR}'] = ParameterDict(
-                operator_params
-            )
+            if operator_number % 2 == 0:
+                self.__local_operators[f'{operator_number}'] = ParameterDict(
+                    operator_params
+                )
+            else:
+                self.__remote_operators[f'{operator_number}'] = ParameterDict(
+                    operator_params
+                )
 
         self.optimizer = torch.optim.Adam(
             self.parameters(), lr=self.LR, weight_decay=self.DECAY
         )
+
+    def params_no_sigmoid(self, operator_number):
+
+        if operator_number % 2 == 0:
+            params = self.__local_operators[f'{operator_number}']
+        else:
+            params = self.__remote_operators[f'{operator_number}']
+
+        if params['lower_bound_1'] > params['upper_bound_1']:
+            params['lower_bound_1'], params['upper_bound_1'] = params[
+                'upper_bound_1'], params['lower_bound_1']
+
+        if params['lower_bound_2'] > params['upper_bound_2']:
+            params['lower_bound_2'], params['upper_bound_2'] = params[
+                'upper_bound_2'], params['lower_bound_2']
+
+        if params['lower_bound_3'] > params['upper_bound_3']:
+            params['lower_bound_3'], params['upper_bound_3'] = params[
+                'upper_bound_3'], params['lower_bound_3']
+
+        bounds = [
+            params['lower_bound_1'].item(), params['upper_bound_1'].item(),
+            params['lower_bound_2'].item(), params['upper_bound_2'].item(),
+            params['lower_bound_3'].item(), params['upper_bound_3'].item()
+        ]
+
+        return bounds
 
     def get_parameters(self, operator_number):
 
@@ -142,14 +201,18 @@ class PerformanceModel(nn.Module):
         norms = self.get_parameters(operator)
 
         bounds = [
-            'upper_bound_1', 'lower_bound_1', 'upper_bound_2', 'lower_bound_2',
-            'upper_bound_3', 'lower_bound_3'
+            'upper_bound_1',
+            'lower_bound_1',
+            'upper_bound_2',
+            'lower_bound_2',
+            'upper_bound_3',
+            'lower_bound_3',
         ]
 
         counter = 0
 
         for i, (norm_l, norm_u) in enumerate(norms):
-            if abs(norm_u - norm_l) < 0.005:
+            if abs(norm_u - norm_l) < 0.05:
                 operators = self.__local_operators if operator % 2 == 0 else self.__remote_operators
                 upper_bound = operators[f'{operator}'][bounds[2 * i]]
                 lower_bound = operators[f'{operator}'][bounds[2 * i + 1]]
@@ -160,17 +223,22 @@ class PerformanceModel(nn.Module):
                     operators[f'{operator}'][bounds[2 * i
                                                     + 1]].requires_grad = False
 
-                print(
-                    "Capability", i, "converged with values (" + lower_bound
-                    + "," + upper_bound + ")"
-                )
+                # print(
+                #     "Capability {}, converged with values ({})".format(
+                #         i, str(lower_bound)
+                #     )
+                # )
 
                 counter += 1
 
         if counter == 3:
 
-            print("All capabilities have converged!")
-            print(norms)
+            print(f"All capabilities have converged for operator {operator}:")
+            print(self.params_no_sigmoid(operator))
+
+            # print("Bound 1:")
+            # print("Bound 2:")
+            # print("Bound 3:")
 
     def update(self, bin_centers, obs_probs, obs_probs_idxs, operator_number):
 
@@ -228,26 +296,27 @@ class PerformanceModel(nn.Module):
 
 class AllocationFramework:
 
-    def __init__(self, num_operator, num_bins, threshold, lr, weight_decay):
+    def __init__(
+        self,
+        num_operators,
+        num_bins,
+        threshold,
+        lr,
+        weight_decay,
+    ):
 
         np.seterr(divide='ignore', invalid='ignore')
 
-        self.OPERATOR = num_operator
+        self.OPERATORS = range(1, num_operators + 1)
         self.NUM_BINS = num_bins
         self.THRESHOLD = threshold
         self.LR = lr
         self.DECAY = weight_decay
         self.RATE = rospy.Rate(100)
 
-        self.__model = PerformanceModel(self.OPERATOR, self.LR, self.DECAY)
+        self.__model = PerformanceModel(num_operators, self.LR, self.DECAY)
         self.__model = self.__model.cuda() if torch.cuda.is_available(
         ) else self.__model
-        self.__data_recorder = DataRecorder(
-            self.OPERATOR,
-            self.THRESHOLD,
-            self.LR,
-            self.DECAY,
-        )
 
         self.__bin_limits = dtype(
             np.concatenate(
@@ -280,7 +349,10 @@ class AllocationFramework:
         self.task_allocation = []
         self.__adjusted_threshold = 0
         self.__is_failure_resolved = False
-        self.__counter = None
+        self.__failure_state = False
+        self.__is_success = False
+        self.__assigned_to = 0
+        self.__task_allocation = []
 
         self.__failures = {
             'start_time': [],
@@ -289,59 +361,55 @@ class AllocationFramework:
             'resolution_start_time': []
         }
 
-        self.__operator_time_failures = {operator: 0}
-        self.__operator_speed = {operator: []}
-        self.total = {operator: 0}
-        self.success = {operator: 0}
+        self.__operator_time_failures = {i: 0 for i in self.OPERATORS}
+        self.__operator_speed = {i: [] for i in self.OPERATORS}
+        self.total = {i: 0 for i in self.OPERATORS}
+        self.success = {i: 0 for i in self.OPERATORS}
 
-        self.__failures_assigned[self.OPERATOR] = 0
-        self.success_matrix[self.OPERATOR] = np.ones(
-            (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
-        )
+        self.__failures_assigned = {}
 
-        # Local operators have even number indexes
-        if self.OPERATOR % 2 == 0:
-            self.observations_probabilities_local[self.OPERATOR] = np.zeros(
-                (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
-            )
-            self.__total_observations_local[self.OPERATOR] = np.zeros(
-                (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
-            )
-            self.__total_success_local[self.OPERATOR] = np.zeros(
-                (self.NUM_BINS, self.NUM_BINS)
-            )
-            self.__success_local[self.OPERATOR] = np.zeros(
+        for i in self.OPERATORS:
+            operator_number = i
+
+            self.__failures_assigned[operator_number] = 0
+            self.success_matrix[operator_number] = np.ones(
                 (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
             )
 
-        else:
-            self.observations_probabilities_remote[self.OPERATOR] = np.zeros(
-                (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
-            )
-            self.__total_observations_remote[self.OPERATOR] = np.zeros(
-                (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
-            )
-            self.__total_success_remote[self.OPERATOR] = np.zeros(
-                (self.NUM_BINS, self.NUM_BINS)
-            )
-            self.__success_remote[self.OPERATOR] = np.zeros(
-                (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
-            )
+            # Local operators have even number indexes
+            if operator_number % 2 == 0:
+                self.observations_probabilities_local[
+                    operator_number] = np.zeros(
+                        (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
+                    )
+                self.__total_observations_local[operator_number] = np.zeros(
+                    (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
+                )
+                self.__total_success_local[operator_number] = np.zeros(
+                    (self.NUM_BINS, self.NUM_BINS)
+                )
+                self.__success_local[operator_number] = np.zeros(
+                    (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
+                )
 
-        load_file_name = '/home/fetch/catkin_workspaces/hololens_ws/src/failure_allocation/src/failure_requirements.csv'
-        data_frame = pd.read_csv(load_file_name, header=None)
+            else:
+                self.observations_probabilities_remote[
+                    operator_number] = np.zeros(
+                        (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
+                    )
+                self.__total_observations_remote[operator_number] = np.zeros(
+                    (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
+                )
+                self.__total_success_remote[operator_number] = np.zeros(
+                    (self.NUM_BINS, self.NUM_BINS)
+                )
+                self.__success_remote[operator_number] = np.zeros(
+                    (self.NUM_BINS, self.NUM_BINS, self.NUM_BINS)
+                )
 
-        self.__task_requirements_list = (data_frame.iloc[:, :18].values)
-
-        self.__task_requirements = []
+        self.__task_requirements = [0.0, 0.0, 0.0]
 
         self.__capabilities = {}
-
-        rospy.Subscriber(
-            '/task_manager/target_counter',
-            Int32,
-            self.__target_counter,
-        )
 
         rospy.Service(
             '/assign_failure',
@@ -353,6 +421,11 @@ class AllocationFramework:
             '/failure_resolved',
             Empty,
             self.__failure_resolved,
+        )
+        rospy.Service(
+            '/record_failure',
+            Empty,
+            self.__record_failure,
         )
 
         rospy.Service(
@@ -366,40 +439,112 @@ class AllocationFramework:
             Empty,
         )
 
-        self.__lower_1_publisher = rospy.Publisher(
-            '/lower_bound_1',
-            Float32,
-            queue_size=1,
-        )
-        self.__lower_2_publisher = rospy.Publisher(
-            '/lower_bound_2',
-            Float32,
-            queue_size=1,
-        )
-        self.__lower_3_publisher = rospy.Publisher(
-            '/lower_bound_3',
-            Float32,
-            queue_size=1,
-        )
-        self.__upper_1_publisher = rospy.Publisher(
-            '/upper_bound_1',
-            Float32,
-            queue_size=1,
-        )
-        self.__upper_2_publisher = rospy.Publisher(
-            '/upper_bound_2',
-            Float32,
-            queue_size=1,
-        )
-        self.__upper_3_publisher = rospy.Publisher(
-            '/upper_bound_3',
-            Float32,
+        self.__failure_state_publisher = rospy.Publisher(
+            '/update_bounds/failure_state',
+            Bool,
             queue_size=1,
         )
 
-    def __target_counter(self, message):
-
-        self.__counter = message.data
+        self.__threshold_publisher = rospy.Publisher(
+            '/update_bounds/threshold',
+            Int32,
+            queue_size=1,
+        )
+        self.__learning_rate_publisher = rospy.Publisher(
+            '/update_bounds/learning_rate',
+            Float32,
+            queue_size=1,
+        )
+        self.__weight_decay_publisher = rospy.Publisher(
+            '/update_bounds/weight_decay',
+            Float32,
+            queue_size=1,
+        )
+        self.__remote_bound_1_publisher = rospy.Publisher(
+            '/update_bounds/remote_bound_1',
+            Float32MultiArray,
+            queue_size=1,
+        )
+        self.__local_bound_1_publisher = rospy.Publisher(
+            '/update_bounds/local_bound_1',
+            Float32MultiArray,
+            queue_size=1,
+        )
+        self.__remote_bound_2_publisher = rospy.Publisher(
+            '/update_bounds/remote_bound_2',
+            Float32MultiArray,
+            queue_size=1,
+        )
+        self.__local_bound_2_publisher = rospy.Publisher(
+            '/update_bounds/local_bound_2',
+            Float32MultiArray,
+            queue_size=1,
+        )
+        self.__remote_bound_3_publisher = rospy.Publisher(
+            '/update_bounds/remote_bound_3',
+            Float32MultiArray,
+            queue_size=1,
+        )
+        self.__local_bound_3_publisher = rospy.Publisher(
+            '/update_bounds/local_bound_3',
+            Float32MultiArray,
+            queue_size=1,
+        )
+        self.__failure_id_publisher = rospy.Publisher(
+            '/update_bounds/failure_id',
+            Int32,
+            queue_size=1,
+        )
+        self.__failure_start_publisher = rospy.Publisher(
+            '/update_bounds/failure_start_time',
+            Float32MultiArray,
+            queue_size=1,
+        )
+        self.__failure_end_publisher = rospy.Publisher(
+            '/update_bounds/failure_end_time',
+            Float32MultiArray,
+            queue_size=1,
+        )
+        self.__failure_durations_publisher = rospy.Publisher(
+            '/update_bounds/failure_durations',
+            Float32MultiArray,
+            queue_size=1,
+        )
+        self.__adjusted_threshold_publisher = rospy.Publisher(
+            '/update_bounds/adjusted_threshold',
+            Float32,
+            queue_size=1,
+        )
+        self.__is_success_publisher = rospy.Publisher(
+            '/update_bounds/success',
+            Bool,
+            queue_size=1,
+        )
+        self.__requirements_publisher = rospy.Publisher(
+            '/update_bounds/',
+            Float32MultiArray,
+            queue_size=1,
+        )
+        self.__operator_times_publisher = rospy.Publisher(
+            '/update_bounds/operator_failure_times',
+            Float32MultiArray,
+            queue_size=1,
+        )
+        self.__failure_assigned_publisher = rospy.Publisher(
+            '/update_bounds/assigned_to',
+            Int32,
+            queue_size=1,
+        )
+        self.__bounds_remote_publisher = rospy.Publisher(
+            '/update_bounds/remote_no_sigmoid_bounds',
+            Float32MultiArray,
+            queue_size=1,
+        )
+        self.__bounds_local_publisher = rospy.Publisher(
+            '/update_bounds/remote_no_sigmoid_bounds',
+            Float32MultiArray,
+            queue_size=1,
+        )
 
     def __failure_service(self, request):
 
@@ -441,8 +586,23 @@ class AllocationFramework:
         self.__start_time_failure = time.time() - self.__start_time
         self.__failures['start_time'].append(self.__start_time_failure)
 
+        self.__failure_state = True
+
         # Remote only
-        self.__assigned_to = self.OPERATOR
+        if not self.__task_allocation:
+
+            self.__assigned_to = 1
+
+        else:
+            if self.__task_allocation[-1] == 1:
+
+                self.__assigned_to = 2
+
+            elif self.__task_allocation[-1] == 2:
+
+                self.__assigned_to = 1
+
+        self.__task_allocation.append(self.__assigned_to)
 
         return self.__assigned_to
 
@@ -461,11 +621,17 @@ class AllocationFramework:
             self.__end_time_failure - self.__start_time_failure
         )
 
+        self.__operator_time_failures[self.__assigned_to
+                                     ] += self.__failures['duration'][-1]
+
+        self.__failure_state = False
         self.__is_failure_resolved = True
 
         return []
 
     def __record_failure(self, request):
+
+        # Merge this with failure_resolved?
 
         # Add a ridiculous number to record it as a failure
         self.__end_time_failure = (time.time() + 10000) - self.__start_time
@@ -476,46 +642,14 @@ class AllocationFramework:
             self.__end_time_failure - self.__start_time_failure
         )
 
+        self.__failure_state = False
         self.__is_failure_resolved = True
 
         return []
 
     def main_loop(self):
 
-        norms = self.__model.get_parameters(self.OPERATOR)
-
-        self.__capabilities[self.OPERATOR] = {
-            'lower_bound_1': norms[0][0],
-            'upper_bound_1': norms[0][1],
-            'lower_bound_2': norms[1][0],
-            'upper_bound_2': norms[1][1],
-            'lower_bound_3': norms[2][0],
-            'upper_bound_3': norms[2][1]
-        }
-
-        lower_bound_1 = Float32()
-        lower_bound_1.data = norms[0][0]
-        self.__lower_1_publisher.publish(lower_bound_1)
-
-        upper_bound_1 = Float32()
-        upper_bound_1.data = norms[0][1]
-        self.__upper_1_publisher.publish(upper_bound_1)
-
-        lower_bound_2 = Float32()
-        lower_bound_2.data = norms[1][0]
-        self.__lower_2_publisher.publish(lower_bound_2)
-
-        upper_bound_2 = Float32()
-        upper_bound_2.data = norms[1][1]
-        self.__upper_2_publisher.publish(upper_bound_2)
-
-        lower_bound_3 = Float32()
-        lower_bound_3.data = norms[2][0]
-        self.__lower_3_publisher.publish(lower_bound_3)
-
-        upper_bound_3 = Float32()
-        upper_bound_3.data = norms[2][1]
-        self.__upper_3_publisher.publish(upper_bound_3)
+        self.__publish_data()
 
         if self.__is_failure_resolved:
 
@@ -525,28 +659,141 @@ class AllocationFramework:
 
             if self.__failures['duration'][-1] < self.THRESHOLD:
                 speed = 1 - (self.__failures['duration'][-1] / self.THRESHOLD)
+                self.__is_success = True
             else:
                 speed = 0
+                self.__is_success = False
 
             self.__operator_speed[self.__assigned_to].append(speed)
 
             self.__update_bounds()
             self.__update_target_service()
 
+            self.__assigned_to = 0
             self.__is_failure_resolved = False
 
-            self.__data_recorder.save_results(
-                self.__counter, self.__assigned_to,
-                self.__failures['start_time'][-1],
-                self.__failures['duration'][-1], self.__adjusted_threshold,
-                self.__task_requirements, self.__capabilities,
-                self.__operator_time_failures
-            )
+    def __publish_data(self):
 
-            if self.__counter == 5:
-                self.__data_recorder.write_results()
+        for operator in self.OPERATORS:
+            norms = self.__model.get_parameters(operator)
+
+            self.__capabilities[operator] = {
+                'lower_bound_1': norms[0][0],
+                'upper_bound_1': norms[0][1],
+                'lower_bound_2': norms[1][0],
+                'upper_bound_2': norms[1][1],
+                'lower_bound_3': norms[2][0],
+                'upper_bound_3': norms[2][1]
+            }
+
+        bounds_remote = Float32MultiArray()
+        bounds_remote.data = self.__model.params_no_sigmoid(1)
+        self.__bounds_remote_publisher.publish(bounds_remote)
+
+        bounds_local = Float32MultiArray()
+        bounds_local.data = self.__model.params_no_sigmoid(2)
+        self.__bounds_local_publisher.publish(bounds_local)
+
+        remote_bound_1 = Float32MultiArray()
+        remote_bound_1.data = [
+            self.__capabilities[1]['lower_bound_1'].item(),
+            self.__capabilities[1]['upper_bound_1'].item(),
+        ]
+        self.__remote_bound_1_publisher.publish(remote_bound_1)
+
+        local_bound_1 = Float32MultiArray()
+        local_bound_1.data = [
+            self.__capabilities[2]['lower_bound_1'].item(),
+            self.__capabilities[2]['upper_bound_1'].item(),
+        ]
+        self.__local_bound_1_publisher.publish(local_bound_1)
+
+        remote_bound_2 = Float32MultiArray()
+        remote_bound_2.data = [
+            self.__capabilities[1]['lower_bound_2'].item(),
+            self.__capabilities[1]['upper_bound_2'].item(),
+        ]
+        self.__remote_bound_2_publisher.publish(remote_bound_2)
+
+        local_bound_2 = Float32MultiArray()
+        local_bound_2.data = [
+            self.__capabilities[2]['lower_bound_2'].item(),
+            self.__capabilities[2]['upper_bound_2'].item(),
+        ]
+        self.__local_bound_2_publisher.publish(local_bound_2)
+
+        remote_bound_3 = Float32MultiArray()
+        remote_bound_3.data = [
+            self.__capabilities[1]['lower_bound_3'].item(),
+            self.__capabilities[1]['upper_bound_3'].item(),
+        ]
+        self.__remote_bound_3_publisher.publish(remote_bound_3)
+
+        local_bound_3 = Float32MultiArray()
+        local_bound_3.data = [
+            self.__capabilities[2]['lower_bound_3'].item(),
+            self.__capabilities[2]['upper_bound_3'].item(),
+        ]
+        self.__local_bound_3_publisher.publish(local_bound_3)
+
+        threshold = Int32()
+        threshold.data = self.THRESHOLD
+        self.__threshold_publisher.publish(threshold)
+
+        learning_rate = Float32()
+        learning_rate.data = self.LR
+        self.__learning_rate_publisher.publish(learning_rate)
+
+        weight_decay = Float32()
+        weight_decay.data = self.DECAY
+        self.__weight_decay_publisher.publish(weight_decay)
+
+        failure_id = Int32()
+        failure_id.data = self.failure_counter
+        self.__failure_id_publisher.publish(failure_id)
+
+        failure_start = Float32MultiArray()
+        failure_start.data = self.__failures['start_time']
+        self.__failure_start_publisher.publish(failure_start)
+
+        failure_end = Float32MultiArray()
+        failure_end.data = self.__failures['end_time']
+        self.__failure_end_publisher.publish(failure_end)
+
+        failure_durations = Float32MultiArray()
+        failure_durations.data = self.__failures['duration']
+        self.__failure_durations_publisher.publish(failure_durations)
+
+        task_requirements = Float32MultiArray()
+        task_requirements.data = self.__task_requirements
+        self.__requirements_publisher.publish(task_requirements)
+
+        adjusted_threshold = Float32()
+        adjusted_threshold.data = self.__adjusted_threshold
+        self.__adjusted_threshold_publisher.publish(adjusted_threshold)
+
+        is_success = Bool()
+        is_success.data = self.__is_success
+        self.__is_success_publisher.publish(is_success)
+
+        failure_state = Bool()
+        failure_state.data = self.__failure_state
+        self.__failure_state_publisher.publish(failure_state)
+
+        time_failures = Float32MultiArray()
+        time_failures.data = [
+            self.__operator_time_failures[1],
+            self.__operator_time_failures[2],
+        ]
+        self.__operator_times_publisher.publish(time_failures)
+
+        assigned_to = Int32()
+        assigned_to.data = self.__assigned_to
+        self.__failure_assigned_publisher.publish(assigned_to)
 
     def __update_bounds(self):
+
+        rospy.loginfo(f'\033[92mUpdating bounds ...\033[0m',)
 
         for j in range(self.NUM_BINS):
             for k in range(self.NUM_BINS):
@@ -611,7 +858,8 @@ class AllocationFramework:
             self.__model.update(
                 self.bin_centers,
                 self.observations_probabilities_local[self.__assigned_to],
-                self.probabilities_index_local, self.__assigned_to
+                self.probabilities_index_local,
+                self.__assigned_to,
             )
 
         else:
@@ -638,126 +886,7 @@ class AllocationFramework:
                 self.probabilities_index_remote, self.__assigned_to
             )
 
-
-class DataRecorder:
-
-    def __init__(self, operator, threshold, lr, weight_decay):
-
-        self.OPERATOR = operator
-        self.THRESHOLD = threshold
-        self.LR = lr
-        self.DECAY = weight_decay
-
-        keys = [
-            'failure_id', 'self.__assigned_to', 'start_time', 'duration',
-            'success', 'requirement_1', 'requirement_2', 'requirement_3',
-            'operator', 'threshold', 'learning_rate', 'weight_decay'
-        ]
-
-        keys.append(f'{self.OPERATOR}_lower_bound_1')
-        keys.append(f'{self.OPERATOR}_upper_bound_1')
-        keys.append(f'{self.OPERATOR}_lower_bound_2')
-        keys.append(f'{self.OPERATOR}_upper_bound_2')
-        keys.append(f'{self.OPERATOR}_lower_bound_3')
-        keys.append(f'{self.OPERATOR}_upper_bound_3')
-        keys.append(f'{self.OPERATOR}_cost')
-        keys.append(f'{self.OPERATOR}_reward_capability_1')
-        keys.append(f'{self.OPERATOR}_reward_capability_2')
-        keys.append(f'{self.OPERATOR}_reward_capability_3')
-        keys.append(f'{self.OPERATOR}_total_reward')
-        keys.append(f'{self.OPERATOR}_assigned_failures')
-        keys.append(f'{self.OPERATOR}_time_spent_failures')
-
-        self.__results = {key: [] for key in keys}
-
-    def save_results(
-        self,
-        failure_id,
-        assigned_to,
-        start_time,
-        duration,
-        threshold,
-        task_requirements,
-        norms,
-        operator_time_failures,
-    ):
-
-        self.__results['failure_id'].append(failure_id)
-        self.__results['self.__assigned_to'].append(assigned_to)
-        self.__results['start_time'].append(start_time)
-        self.__results['duration'].append(duration)
-        self.__results['requirement_1'].append(task_requirements[0])
-        self.__results['requirement_2'].append(task_requirements[1])
-        self.__results['requirement_3'].append(task_requirements[2])
-        self.__results['operator'].append(self.OPERATOR)
-        self.__results['threshold'].append(threshold)
-        self.__results['learning_rate'].append(self.LR)
-        self.__results['weight_decay'].append(self.DECAY)
-
-        if duration < threshold:
-            self.__results['success'].append(True)
-        else:
-            self.__results['success'].append(False)
-
-        self.__results[f'{self.OPERATOR}_lower_bound_1'].append(
-            norms[self.OPERATOR]['lower_bound_1'].item()
-        )
-        self.__results[f'{self.OPERATOR}_upper_bound_1'].append(
-            norms[self.OPERATOR]['upper_bound_1'].item()
-        )
-        self.__results[f'{self.OPERATOR}_lower_bound_2'].append(
-            norms[self.OPERATOR]['lower_bound_2'].item()
-        )
-        self.__results[f'{self.OPERATOR}_upper_bound_2'].append(
-            norms[self.OPERATOR]['upper_bound_2'].item()
-        )
-        self.__results[f'{self.OPERATOR}_lower_bound_3'].append(
-            norms[self.OPERATOR]['lower_bound_3'].item()
-        )
-        self.__results[f'{self.OPERATOR}_upper_bound_3'].append(
-            norms[self.OPERATOR]['upper_bound_3'].item()
-        )
-        self.__results[f'{self.OPERATOR}_time_spent_failures'].append(
-            operator_time_failures[self.OPERATOR]
-        )
-
-    def write_results(self):
-
-        # Determine the filename
-        base_filename = f'operator_{self.OPERATOR}.csv'
-        results_dir = 'results'  # Directory to save results
-        filename = os.path.join(results_dir, base_filename)
-
-        # Ensure the results directory exists
-        os.makedirs(results_dir, exist_ok=True)
-
-        # Check if the file already exists
-        if os.path.exists(filename):
-            # Find the next available filename
-            suffix = 1
-            while True:
-                new_filename = f'{filename.split(".csv")[0]} ({suffix}).csv'
-                if not os.path.exists(new_filename):
-                    filename = new_filename
-                    break
-                suffix += 1
-
-        # Generate headers from self.__results keys
-        headers = list(self.__results.keys())
-
-        # Write to CSV
-        with open(filename, 'w', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(headers)  # Write headers
-
-            # Write each key's values as separate rows
-            max_length = max(len(self.__results[key]) for key in headers)
-            for i in range(max_length):
-                row = [
-                    self.__results[key][i]
-                    if i < len(self.__results[key]) else None for key in headers
-                ]
-                writer.writerow(row)
+        rospy.loginfo(f'\033[92mBounds updated.\033[0m',)
 
 
 if __name__ == "__main__":
@@ -767,15 +896,14 @@ if __name__ == "__main__":
         log_level=rospy.INFO,
     )
 
-    operator = rospy.get_param(param_name=f'{rospy.get_name()}/operator')
-
+    operators = 2
     bins = 25
     max_threshold = 100
     learning_rate = 0.001
     decay = 0.001
 
     performance_model_allocation = AllocationFramework(
-        num_operator=operator,
+        num_operators=operators,
         num_bins=bins,
         threshold=max_threshold,
         lr=learning_rate,
