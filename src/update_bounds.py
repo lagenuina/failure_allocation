@@ -560,7 +560,7 @@ class AllocationFramework:
 
         if error_code == 1:
 
-            if self.failure_counter in [5, 10]:
+            if self.failure_counter in [3, 8, 13, 18, 23, 28]:
                 # Medicine is misplaced
                 physical_requirement = round(random.uniform(0.4, 0.6), 1)
                 cognitive_requirement = round(random.uniform(0.8, 1.0), 1)

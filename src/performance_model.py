@@ -487,7 +487,7 @@ class AllocationFramework:
 
         error_code = request.request
 
-        if self.__counter not in [1, 3, 5, 6, 9, 10, 11, 15, 16, 18]:
+        if self.__counter not in [1, 3, 4, 6, 7, 9, 12, 13, 15]:
 
             if error_code == 1:
 
