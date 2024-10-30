@@ -12,7 +12,7 @@ import random
 
 from std_msgs.msg import (Int32, Bool, Float32, Float32MultiArray)
 from std_srvs.srv import (Empty)
-from Scripts.srv import (ReceiveInt)
+from Scripts.srv import (ReceiveInt, UpdateState)
 
 # Set data type based on CUDA availability
 dtype = torch.cuda.FloatTensor if torch.cuda.is_available(
@@ -36,6 +36,9 @@ class PerformanceModel(nn.Module):
         self.__t_count = 0
         self.LR = lr
         self.DECAY = weight_decay
+
+        self.remote_bounds_converged = False
+        self.local_bounds_converged = False
 
         # Changed initialization of local and remote operators
         for operator_number in self.OPERATORS:
@@ -116,9 +119,12 @@ class PerformanceModel(nn.Module):
                 'upper_bound_3'], params['lower_bound_3']
 
         bounds = [
-            params['lower_bound_1'].item(), params['upper_bound_1'].item(),
-            params['lower_bound_2'].item(), params['upper_bound_2'].item(),
-            params['lower_bound_3'].item(), params['upper_bound_3'].item()
+            round(params['lower_bound_1'].item(), 2),
+            round(params['upper_bound_1'].item(), 2),
+            round(params['lower_bound_2'].item(), 2),
+            round(params['upper_bound_2'].item(), 2),
+            round(params['lower_bound_3'].item(), 2),
+            round(params['upper_bound_3'].item(), 2)
         ]
 
         return bounds
@@ -223,22 +229,24 @@ class PerformanceModel(nn.Module):
                     operators[f'{operator}'][bounds[2 * i
                                                     + 1]].requires_grad = False
 
-                # print(
-                #     "Capability {}, converged with values ({})".format(
-                #         i, str(lower_bound)
-                #     )
-                # )
-
                 counter += 1
 
         if counter == 3:
 
-            print(f"All capabilities have converged for operator {operator}:")
-            print(self.params_no_sigmoid(operator))
+            if operator == 1:
+                self.remote_bounds_converged = True
 
-            # print("Bound 1:")
-            # print("Bound 2:")
-            # print("Bound 3:")
+            elif operator == 2:
+                self.local_bounds_converged = True
+
+            print(f"All capabilities have converged for operator {operator}.")
+
+        if self.remote_bounds_converged and self.local_bounds_converged:
+
+            for operator in self.OPERATORS:
+                print("Operator {operator}:")
+                print(self.params_no_sigmoid(operator))
+                print("")
 
     def update(self, bin_centers, obs_probs, obs_probs_idxs, operator_number):
 
@@ -521,7 +529,7 @@ class AllocationFramework:
             queue_size=1,
         )
         self.__requirements_publisher = rospy.Publisher(
-            '/update_bounds/',
+            '/update_bounds/task_requirements',
             Float32MultiArray,
             queue_size=1,
         )
@@ -541,7 +549,7 @@ class AllocationFramework:
             queue_size=1,
         )
         self.__bounds_local_publisher = rospy.Publisher(
-            '/update_bounds/remote_no_sigmoid_bounds',
+            '/update_bounds/local_no_sigmoid_bounds',
             Float32MultiArray,
             queue_size=1,
         )
@@ -596,11 +604,17 @@ class AllocationFramework:
         else:
             if self.__task_allocation[-1] == 1:
 
-                self.__assigned_to = 2
+                if not self.__model.local_bounds_converged:
+                    self.__assigned_to = 2
+                else:
+                    self.__assigned_to = 1
 
             elif self.__task_allocation[-1] == 2:
 
-                self.__assigned_to = 1
+                if not self.__model.remote_bounds_converged:
+                    self.__assigned_to = 1
+                else:
+                    self.__assigned_to = 2
 
         self.__task_allocation.append(self.__assigned_to)
 
@@ -627,6 +641,8 @@ class AllocationFramework:
         self.__failure_state = False
         self.__is_failure_resolved = True
 
+        print("Failure resolved!")
+
         return []
 
     def __record_failure(self, request):
@@ -645,17 +661,19 @@ class AllocationFramework:
         self.__failure_state = False
         self.__is_failure_resolved = True
 
+        print("Failure resolved!")
+
         return []
 
     def main_loop(self):
 
+        self.__adjusted_threshold = self.THRESHOLD / (
+            1 + self.__task_requirements[2]
+        )
+
         self.__publish_data()
 
         if self.__is_failure_resolved:
-
-            self.__adjusted_threshold = self.THRESHOLD / (
-                1 + self.__task_requirements[2]
-            )
 
             if self.__failures['duration'][-1] < self.THRESHOLD:
                 speed = 1 - (self.__failures['duration'][-1] / self.THRESHOLD)
@@ -667,6 +685,8 @@ class AllocationFramework:
             self.__operator_speed[self.__assigned_to].append(speed)
 
             self.__update_bounds()
+            print(self.__model.params_no_sigmoid(self.__assigned_to))
+
             self.__update_target_service()
 
             self.__assigned_to = 0
@@ -898,7 +918,7 @@ if __name__ == "__main__":
 
     operators = 2
     bins = 25
-    max_threshold = 100
+    max_threshold = 80
     learning_rate = 0.001
     decay = 0.001
 

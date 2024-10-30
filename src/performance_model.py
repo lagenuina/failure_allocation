@@ -9,6 +9,9 @@ import time
 import pandas as pd
 import random
 
+import os
+from glob import glob
+from ast import (literal_eval)
 from std_msgs.msg import (Int32, Bool, Float32, Float32MultiArray)
 from std_srvs.srv import (Empty)
 from Scripts.srv import (ReceiveInt)
@@ -49,54 +52,55 @@ class PerformanceModel(nn.Module):
                 operator_params = {
                     'lower_bound_1':
                         Parameter(
-                            dtype(local_1 * np.ones(1)), requires_grad=True
+                            dtype(local_1[0] * np.ones(1)), requires_grad=True
                         ),
                     'upper_bound_1':
                         Parameter(
-                            dtype(local_1 * np.ones(1)), requires_grad=True
+                            dtype(local_1[1] * np.ones(1)), requires_grad=True
                         ),
                     'lower_bound_2':
                         Parameter(
-                            dtype(local_2 * np.ones(1)), requires_grad=True
+                            dtype(local_2[0] * np.ones(1)), requires_grad=True
                         ),
                     'upper_bound_2':
                         Parameter(
-                            dtype(local_2 * np.ones(1)), requires_grad=True
+                            dtype(local_2[1] * np.ones(1)), requires_grad=True
                         ),
                     'lower_bound_3':
                         Parameter(
-                            dtype(local_3 * np.ones(1)), requires_grad=True
+                            dtype(local_3[0] * np.ones(1)), requires_grad=True
                         ),
                     'upper_bound_3':
                         Parameter(
-                            dtype(local_3 * np.ones(1)), requires_grad=True
+                            dtype(local_3[1] * np.ones(1)), requires_grad=True
                         )
                 }
+
             else:
                 operator_params = {
                     'lower_bound_1':
                         Parameter(
-                            dtype(remote_1 * np.ones(1)), requires_grad=True
+                            dtype(remote_1[0] * np.ones(1)), requires_grad=True
                         ),
                     'upper_bound_1':
                         Parameter(
-                            dtype(remote_1 * np.ones(1)), requires_grad=True
+                            dtype(remote_1[1] * np.ones(1)), requires_grad=True
                         ),
                     'lower_bound_2':
                         Parameter(
-                            dtype(remote_2 * np.ones(1)), requires_grad=True
+                            dtype(remote_2[0] * np.ones(1)), requires_grad=True
                         ),
                     'upper_bound_2':
                         Parameter(
-                            dtype(remote_2 * np.ones(1)), requires_grad=True
+                            dtype(remote_2[1] * np.ones(1)), requires_grad=True
                         ),
                     'lower_bound_3':
                         Parameter(
-                            dtype(remote_3 * np.ones(1)), requires_grad=True
+                            dtype(remote_3[0] * np.ones(1)), requires_grad=True
                         ),
                     'upper_bound_3':
                         Parameter(
-                            dtype(remote_3 * np.ones(1)), requires_grad=True
+                            dtype(remote_3[1] * np.ones(1)), requires_grad=True
                         ),
                 }
             if operator_number % 2 == 0:
@@ -522,14 +526,9 @@ class AllocationFramework:
                 self.__task_requirements_list[:, self.failure_counter]
             )
 
-        print("Task requirements:", self.__task_requirements)
+        self.__calculate_expected_reward()
 
-        if self.MODE == 1:
-            self.__assigned_to = np.random.randint(1, 3)
-
-        elif self.MODE == 2:
-            self.__calculate_expected_reward()
-            self.__assigned_to = self.__assign_failure(self.__expected_reward)
+        self.__assigned_to = self.__assign_failure(self.__expected_reward)
 
         self.__failure_state = True
 
@@ -559,7 +558,7 @@ class AllocationFramework:
         self.__failure_state = False
         self.__is_failure_resolved = True
 
-        print("Failure Resolved!")
+        print("Failure resolved!")
 
         return []
 
@@ -577,34 +576,42 @@ class AllocationFramework:
         self.__is_failure_resolved = True
         self.__failure_state = False
 
+        print("Failure resolved!")
+
         return []
 
     def __assign_failure(self, expected_reward):
 
-        reward_keys = list(expected_reward.keys())
-        reward_tensors = list(expected_reward.values())
+        if self.MODE == 1:
+            failure_allocated_to = np.random.randint(1, 3)
 
-        # Concatenate tensors into a single tensor
-        concatenated_tensor = torch.cat(reward_tensors)
+        elif self.MODE == 2:
 
-        # Find the maximum value in the tensor
-        highest_reward = concatenated_tensor.max().item()
+            reward_keys = list(expected_reward.keys())
+            reward_tensors = list(expected_reward.values())
 
-        # Find all indices with the maximum value
-        operators_highest_reward = (concatenated_tensor == highest_reward
-                                   ).nonzero(as_tuple=True)[0].tolist()
+            # Concatenate tensors into a single tensor
+            concatenated_tensor = torch.cat(reward_tensors)
 
-        if len(operators_highest_reward) > 1:
+            # Find the maximum value in the tensor
+            highest_reward = concatenated_tensor.max().item()
 
-            # Assign to the operator with least amount of failures
-            failure_allocated_to = min(
-                self.__failures_assigned,
-                key=lambda k: self.__failures_assigned[k]
-            )
+            # Find all indices with the maximum value
+            operators_highest_reward = (concatenated_tensor == highest_reward
+                                       ).nonzero(as_tuple=True)[0].tolist()
 
-        else:
-            highest_reward_operator_index = operators_highest_reward[0]
-            failure_allocated_to = reward_keys[highest_reward_operator_index]
+            if len(operators_highest_reward) > 1:
+
+                # Assign to the operator with least amount of failures
+                failure_allocated_to = min(
+                    self.__failures_assigned,
+                    key=lambda k: self.__failures_assigned[k]
+                )
+
+            else:
+                highest_reward_operator_index = operators_highest_reward[0]
+                failure_allocated_to = reward_keys[highest_reward_operator_index
+                                                  ]
 
         self.__failures_assigned[failure_allocated_to] += 1
 
@@ -831,13 +838,13 @@ class AllocationFramework:
 
     def main_loop(self):
 
+        self.__adjusted_threshold = self.THRESHOLD / (
+            1 + self.__task_requirements[2]
+        )
+
         self.__publish_data()
 
         if self.__is_failure_resolved:
-
-            self.__adjusted_threshold = self.THRESHOLD / (
-                1 + self.__task_requirements[2]
-            )
 
             if self.__failures['duration'][-1] < self.THRESHOLD:
                 speed = 1 - (self.__failures['duration'][-1] / self.THRESHOLD)
@@ -908,7 +915,7 @@ if __name__ == "__main__":
     operators = 2
     bins = 25
     failures = 18
-    max_threshold = 100
+    max_threshold = 80
 
     learning_rate = 0.001
     decay = 0.001
@@ -918,35 +925,48 @@ if __name__ == "__main__":
         default='',
     )
 
-    remote_capability_1 = rospy.get_param(
-        param_name=f'{rospy.get_name()}/remote_capability_1',
+    participant = rospy.get_param(
+        param_name=f'{rospy.get_name()}/participant',
         default='',
     )
 
-    remote_capability_2 = rospy.get_param(
-        param_name=f'{rospy.get_name()}/remote_capability_2',
-        default='',
-    )
+    folder_path = f'/home/fetch/data/failure-allocation/p{participant}/m0/t0'
+    csv_files = glob(os.path.join(folder_path, '*.csv'))
 
-    remote_capability_3 = rospy.get_param(
-        param_name=f'{rospy.get_name()}/remote_capability_3',
-        default='',
-    )
+    # Sort files by last modified time in descending order (most recent first)
+    csv_files = sorted(csv_files, key=os.path.getmtime, reverse=True)
 
-    local_capability_1 = rospy.get_param(
-        param_name=f'{rospy.get_name()}/local_capability_1',
-        default='',
-    )
+    if csv_files:
+        latest_csv_file = csv_files[0]
 
-    local_capability_2 = rospy.get_param(
-        param_name=f'{rospy.get_name()}/local_capability_2',
-        default='',
-    )
+        # Load the data from the latest CSV file
+        data = pd.read_csv(latest_csv_file)
 
-    local_capability_3 = rospy.get_param(
-        param_name=f'{rospy.get_name()}/local_capability_3',
-        default='',
-    )
+        local_bounds = list(
+            literal_eval(data['local_no_sigmoid_bounds'].iloc[-1])
+        )
+        remote_bounds = list(
+            literal_eval(data['remote_no_sigmoid_bounds'].iloc[-1])
+        )
+
+        remote_capability_1 = [remote_bounds[0], remote_bounds[1]]
+        remote_capability_2 = [remote_bounds[2], remote_bounds[3]]
+        remote_capability_3 = [remote_bounds[4], remote_bounds[5]]
+
+        local_capability_1 = [local_bounds[0], local_bounds[1]]
+        local_capability_2 = [local_bounds[2], local_bounds[3]]
+        local_capability_3 = [local_bounds[4], local_bounds[5]]
+
+        print("Remote bounds:")
+        print(remote_capability_1)
+        print(remote_capability_2)
+        print(remote_capability_3)
+
+        print("")
+        print("Local bounds:")
+        print(local_capability_1)
+        print(local_capability_2)
+        print(local_capability_3)
 
     performance_model_allocation = AllocationFramework(
         num_operators=operators,
